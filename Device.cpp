@@ -61,7 +61,7 @@ bool CDevice::Open()
 			Close();
 		}
 
-		Slots = (FlashSize / 65536) - 1;
+		Slots = FlashSize / 65536;
 		Flash = new CFlash(this);
 
 	}
@@ -114,6 +114,7 @@ uint32_t CDevice::GetFlashSize()
 	}
 
 	//unknown flash chip
+	printf("Unknown flash chip detected.  Flash ID: $%06X\n", this->FlashID);
 	return(0);
 }
 
