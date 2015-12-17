@@ -18,10 +18,12 @@ enum {
 	ID_SPI_READ = 1,
 	ID_SPI_READ_STOP,
 	ID_SPI_WRITE,
+	ID_SPI_VERIFY,
 
 	ID_SPI_SRAM_READ,
 	ID_SPI_SRAM_READ_STOP,
 	ID_SPI_SRAM_WRITE,
+	ID_SPI_SRAM_VERIFY,
 
 	ID_READ_IO = 0x10,
 	ID_DISK_READ_START,
@@ -34,20 +36,33 @@ enum {
 	ID_FIRMWARE_UPDATE,
 };
 
+enum {
+	DEFAULT_LEAD_IN = 28300,      //#bits (~25620 min)
+	GAP = 976 / 8 - 1,                //(~750 min)
+	MIN_GAP_SIZE = 0x300,         //bits
+	FDSSIZE = 65500,              //size of .fds disk side, excluding header
+	FLASHHEADERSIZE = 0x100,
+	SLOTSIZE = 65536,
+};
+
+class CSram;
 class CFlash;
+class CFlashUtil;
 class CDevice
 {
 private:
-	hid_device *handle;
-	uint8_t	hidbuf[256];
-
+	hid_device	*handle;
+	uint8_t		hidbuf[256];
+	uint8_t		sequence;
 public:
-	char		DeviceName[256];
-	int		Version;
-	int		VendorID, ProductID;
-	CFlash	*Flash;
-	uint32_t	FlashID;
-	uint32_t FlashSize, Slots;
+	char			DeviceName[256];
+	int			Version;
+	int			VendorID, ProductID;
+	CSram			*Sram;
+	CFlash		*Flash;
+	CFlashUtil	*FlashUtil;
+	uint32_t		FlashID;
+	uint32_t		FlashSize, Slots;
 
 private:
 
@@ -82,6 +97,15 @@ public:
 	//spi sram commands
 	bool SramRead(uint8_t *buf, int size, bool holdCS);
 	bool SramWrite(uint8_t *buf, int size, bool initCS, bool holdCS);
+
+	//fds disk drive commands
+	bool DiskWriteStart();
+	bool DiskWrite(uint8_t *buf, int size);
+	bool DiskReadStart();
+	int DiskRead(uint8_t *buf);
+
 };
 
+#include "Sram.h"
 #include "Flash.h"
+#include "FlashUtil.h"

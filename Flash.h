@@ -21,6 +21,8 @@ enum {
 	PAGESIZE = 256,
 };
 
+typedef void(*TCallback)(void*, int);
+
 class CFlash
 {
 protected:
@@ -37,7 +39,8 @@ public:
 
 	//read and write to flash
 	virtual bool Read(uint8_t *buf, uint32_t addr, int size);
-	virtual bool Write(uint8_t *buf, uint32_t addr, int size);
+	virtual bool Write(uint8_t *buf, uint32_t addr, int size, TCallback cb = 0, void *user = 0);
+	virtual bool Erase(uint32_t addr, int size);
 
 	//write one 256 byte page
 	virtual bool PageProgram(uint32_t addr, uint8_t *buf);

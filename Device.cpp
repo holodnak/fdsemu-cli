@@ -62,8 +62,9 @@ bool CDevice::Open()
 		}
 
 		Slots = FlashSize / 65536;
+		Sram = new CSram(this);
 		Flash = new CFlash(this);
-
+		FlashUtil = new CFlashUtil(this);
 	}
 	else {
 		printf("Device not found.\n");
@@ -77,10 +78,14 @@ void CDevice::Close()
 	if (this->Flash) {
 		delete this->Flash;
 	}
+	if (this->FlashUtil) {
+		delete this->FlashUtil;
+	}
 	if (this->handle) {
 		hid_close(this->handle);
 	}
 	this->Flash = 0;
+	this->FlashUtil = 0;
 	this->handle = NULL;
 }
 
@@ -104,12 +109,17 @@ uint32_t CDevice::GetFlashSize()
 {
 	switch (this->FlashID) {
 
-		//8mbit flash (1mbyte)
-		case 0x1440EF:		//W25Q80DV
+		//16mbit flash
+		case 0x1440EF: // W25Q80DV
 			return(0x100000);
 
-		//64mbit flash (8mbyte)
-		case 0x174001:		//S25FL164K
+		//32mbit flash
+		case 0x1640EF: // W25Q32FV
+			return(0x400000);
+
+		//64mbit flash
+		case 0x1740EF: // W25Q64FV
+		case 0x174001: // S25FL164K
 			return(0x800000);
 	}
 
@@ -170,6 +180,9 @@ bool CDevice::GenericWrite(int reportid, uint8_t *buf, int size, bool initCS, bo
 	if (size)
 		memcpy(hidbuf + 4, buf, size);
 	ret = hid_send_feature_report(handle, hidbuf, 4 + size);
+	if (ret == -1) {
+		wprintf(L"error: %s\n", hid_error(handle));
+	}
 	return(ret >= 0);
 }
 
@@ -192,3 +205,65 @@ bool CDevice::SramWrite(uint8_t *buf, int size, bool initCS, bool holdCS)
 {
 	return(GenericWrite(ID_SPI_SRAM_WRITE, buf, size, initCS, holdCS));
 }
+
+bool CDevice::DiskWriteStart()
+{
+	hidbuf[0] = ID_DISK_WRITE_START;
+	return hid_send_feature_report(handle, hidbuf, 2) >= 0;
+}
+
+bool CDevice::DiskWrite(uint8_t *buf, int size)
+{
+	if (size != DISK_WRITEMAX)        //always max!
+		return false;
+	hidbuf[0] = ID_DISK_WRITE;
+	memcpy(hidbuf + 1, buf, size);
+	return hid_write(handle, hidbuf, DISK_WRITEMAX + 1) >= 0;     // WRITEMAX+reportID
+}
+
+bool CDevice::DiskReadStart()
+{
+	hidbuf[0] = ID_DISK_READ_START;
+	sequence = 1;
+	return hid_send_feature_report(handle, hidbuf, 2) >= 0;
+}
+
+int CDevice::DiskRead(uint8_t *buf)
+{
+	int result;
+
+	hidbuf[0] = ID_DISK_READ;
+	result = hid_get_feature_report(handle, hidbuf, DISK_READMAX + 2);  // + reportID + sequence
+
+	//hidapi increments the result by 1 to account for the report id, if it was a success
+	if (result > 0) {
+		result--;
+	}
+
+	//read time out
+	if (result < 2) {
+		printf("\nDisk read timed out\n");
+		return(-1);
+	}
+
+	//adapter will send incomplete/empty packets when it's out of data (end of disk)
+	else if (result > 2) {
+		memcpy(buf, hidbuf + 2, result - 2);
+
+		//sequence out of order (data lost)
+		if (hidbuf[1] != sequence++) {
+			printf("\nDisk read sequence out of order (got %d, wanted %d)\n",hidbuf[1],sequence-1);
+			return(-1);
+		}
+		else {
+//			printf("read %d bytes\n", result - 2);
+			return(result - 2);
+		}
+	}
+
+	else {
+		printf("\nDisk read returned no data\n");
+		return(0);
+	}
+}
+

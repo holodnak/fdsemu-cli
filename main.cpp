@@ -5,12 +5,10 @@
 #include "Device.h"
 #include "Flash.h"
 #include "System.h"
+#include "DiskImage.h"
+#include "build.h"
 
 CDevice dev;
-
-enum {
-	SLOTSIZE = 65536,
-};
 
 enum {
 	ACTION_NONE = 0,
@@ -18,17 +16,39 @@ enum {
 	ACTION_LIST,
 	ACTION_READFLASH,
 	ACTION_WRITEFLASH,
+	ACTION_ERASEFLASH,
+	ACTION_READDISK,
+	ACTION_WRITEDISK,
 	ACTION_UPDATEFIRMWARE,
 	ACTION_UPDATELOADER,
 };
 
-enum {
-	DEFAULT_LEAD_IN = 28300,      //#bits (~25620 min)
-	GAP = 976 / 8 - 1,                //(~750 min)
-	MIN_GAP_SIZE = 0x300,         //bits
-	FDSSIZE = 65500,              //size of .fds disk side, excluding header
-	FLASHHEADERSIZE = 0x100,
-};
+void cli_progress(void *user, int n)
+{
+	printf(".");
+}
+
+__inline uint8_t raw_to_raw03_byte(uint8_t raw)
+{
+	if (raw < 0x48)
+		return(3);
+	else if (raw < 0x70)
+		return(0);
+	else if (raw < 0xA0)
+		return(1);
+	else if (raw < 0xD0)
+		return(2);
+	return(3);
+}
+
+//Turn raw data from adapter to pulse widths (0..3)
+//Input capture clock is 6MHz.  At 96.4kHz (FDS bitrate), 1 bit ~= 62 clocks
+//We could be clever about this and account for drive speed fluctuations, etc. but this will do for now
+static void raw_to_raw03(uint8_t *raw, int rawSize) {
+	for (int i = 0; i<rawSize; ++i) {
+		raw[i] = raw_to_raw03_byte(raw[i]);
+	}
+}
 
 //don't include gap end
 uint16_t calc_crc(uint8_t *buf, int size) {
@@ -94,6 +114,7 @@ int fds_to_bin(uint8_t *dst, uint8_t *src, int dstSize) {
 
 int action = ACTION_NONE;
 int verbose = 0;
+int force = 0;
 
 //allocate buffer and read whole file
 bool loadfile(char *filename, uint8_t **buf, int *filesize)
@@ -134,6 +155,7 @@ static void usage(char *argv0)
 		"  Flash operations:\n"
 		"    -f file.fds [1..n]            write image to flash slot [1..n]\n"
 		"    -s file.fds [1..n]            save image from flash slot [1..n]\n"
+		"    -e [1..n] | all               erase slot [1..n] or erase all slots\n"
 		"    -l                            list images stored on flash\n"
 		"\n"
 		"  Disk operations:\n"
@@ -142,12 +164,37 @@ static void usage(char *argv0)
 		"    -w file.fds                   write disk from fwNES format disk image\n"
 		"\n"
 		"  Other operations:\n"
+		"    -u loader.fds                 update loader from fwNES loader image\n"
 		"    -U firmware.bin               update firmware from firmware image\n"
-		"    -L loader.fds                 update loader from fwNES loader image\n"
 		"\n"
 		"  Options:\n"
 		"    -v                            more verbose output\n"
 		"";
+/*	char usagestr[] =
+		"Commands:\n\n"
+		" Flash operations:\n\n"
+		"  -f, --write-flash [files...]     write image(s) to flash\n"
+		"  -s, --save-flash [file] [1..n]   save image from flash slot [1..n]\n"
+		"  -e, --erase-slot [1..n]          erase flash disk image in slot [1..n]\n"
+		"  -d, --dump [file] [addr] [size]  dump flash from starting addr, size bytes\n"
+		"  -W, --write-dump [file] [addr]   write raw flash data to flash\n"
+		"\n"
+		" Disk operations:\n\n"
+		"  -r [file]                        read disk to file, type must be specified\n"
+		"  -w [file]                        write file to disk\n"
+		"\n"
+		" Conversion operations:\n\n"
+		"  -c, --convert [infile] [outfile] convert disk image, type must be specified\n"
+		"\n"
+		" Update operations:\n\n"
+		"  -u, --update-loader [file]       update loader from fwFDS loader image\n"
+		"  -U, --update-firmware [file]     update firmware from binary image\n"
+		"\n"
+		"Options:\n\n"
+		"  -v, --verbose                    more verbose output\n"
+		"      --force                      force operation\n"
+		"  -t, --type [type]                specify file type, valid types: fds bin raw\n"
+		"\n";*/
 
 	printf("\n  usage: %s <arguments>\n\n%s", "fdsemu-cli", usagestr);
 }
@@ -192,7 +239,7 @@ bool firmware_update(char *filename)
 	buf32[(0x8000 - 4) / 4] = chksum;
 
 	printf("uploading new firmware");
-	if (!dev.Flash->Write(buf, 0x8000, 0x8000)) {
+	if (!dev.Flash->Write(buf, 0x8000, 0x8000, cli_progress)) {
 		printf("Write failed.\n");
 		return false;
 	}
@@ -224,6 +271,656 @@ uint32_t chksum_calc(uint8_t *buf, int size)
 	return(ret);
 }
 
+//look for pattern of bits matching block 1
+static int findFirstBlock(uint8_t *raw) {
+	static const uint8_t dat[] = { 1,0,1,0,0,0,0,0, 0,1,2,2,1,0,1,0, 0,1,1,2,1,1,1,1, 1,1,0,0,1,1,1,0 };
+	int i, len;
+	for (i = 0, len = 0; i<0x2000 * 8; i++) {
+		if (raw[i] == dat[len]) {
+			if (len == sizeof(dat) - 1)
+				return i - len;
+			len++;
+		}
+		else {
+			i -= len;
+			len = 0;
+		}
+	}
+	return -1;
+}
+
+bool block_decode(uint8_t *dst, uint8_t *src, int *inP, int *outP, int srcSize, int dstSize, int blockSize, char blockType) {
+	if (*outP + blockSize + 2 > dstSize) {
+		printf("Out of space\n");
+		return false;
+	}
+
+	int in = *inP;
+	int outEnd = (*outP + blockSize + 2) * 8;
+	int out = (*outP) * 8;
+	int start;
+
+	//scan for gap end
+	for (int zeros = 0; src[in] != 1 || zeros<MIN_GAP_SIZE; in++) {
+		if (src[in] == 0) {
+			zeros++;
+		}
+		else {
+			zeros = 0;
+		}
+		if (in >= srcSize - 2)
+			return false;
+	}
+	start = in;
+
+	char bitval = 1;
+	in++;
+	do {
+		if (in >= srcSize) {   //not necessarily an error, probably garbage at end of disk
+									  //printf("Disk end\n"); 
+			return false;
+		}
+		switch (src[in] | (bitval << 4)) {
+		case 0x11:
+			out++;
+		case 0x00:
+			out++;
+			bitval = 0;
+			break;
+		case 0x12:
+			out++;
+		case 0x01:
+		case 0x10:
+			dst[out / 8] |= 1 << (out & 7);
+			out++;
+			bitval = 1;
+			break;
+		default: //Unexpected value.  Keep going, we'll probably get a CRC warning
+					//printf("glitch(%d) @ %X(%X.%d)\n", src[in], in, out/8, out%8);
+			out++;
+			bitval = 0;
+			break;
+		}
+		in++;
+	} while (out<outEnd);
+	if (dst[*outP] != blockType) {
+		printf("Wrong block type %X(%X)-%X(%X) (found %d, expected %d)\n", start, *outP, in, out - 1, dst[*outP], blockType);
+		return false;
+	}
+	out = out / 8 - 2;
+
+	//printf("Out%d %X(%X)-%X(%X)\n", blockType, start, *outP, in, out-1);
+
+	if (calc_crc(dst + *outP, blockSize + 2)) {
+		uint16_t crc1 = (dst[out + 1] << 8) | dst[out];
+		dst[out] = 0;
+		dst[out + 1] = 0;
+		uint16_t crc2 = calc_crc(dst + *outP, blockSize + 2);
+		printf("Bad CRC (%04X!=%04X)\n", crc1, crc2);
+	}
+
+	dst[out] = 0;     //clear CRC
+	dst[out + 1] = 0;
+	dst[out + 2] = 0;   //+spare bit
+	*inP = in;
+	*outP = out;
+	return true;
+}
+
+//Simplified disk decoding.  This assumes disk will follow standard FDS file structure
+static bool raw03_to_fds(uint8_t *raw, uint8_t *fds, int rawsize) {
+	int in, out;
+
+	memset(fds, 0, FDSSIZE);
+
+	//lead-in can vary a lot depending on drive, scan for first block to get our bearings
+	in = findFirstBlock(raw) - MIN_GAP_SIZE;
+	if (in<0)
+		return false;
+
+	out = 0;
+	if (!block_decode(fds, raw, &in, &out, rawsize, FDSSIZE + 2, 0x38, 1))
+		return false;
+	if (!block_decode(fds, raw, &in, &out, rawsize, FDSSIZE + 2, 2, 2))
+		return false;
+	do {
+		if (!block_decode(fds, raw, &in, &out, rawsize, FDSSIZE + 2, 16, 3))
+			return true;
+		if (!block_decode(fds, raw, &in, &out, rawsize, FDSSIZE + 2, 1 + (fds[out - 16 + 13] | (fds[out - 16 + 14] << 8)), 4))
+			return true;
+	} while (in<rawsize);
+	return true;
+}
+
+//make raw0-3 from flash image (sans header)
+static void bin_to_raw03(uint8_t *bin, uint8_t *raw, int binSize, int rawSize) {
+	int in, out;
+	uint8_t bit, data;
+
+	memset(raw, 0xff, rawSize);
+	for (bit = 1, out = 0, in = 0; in<binSize * 8; in++) {
+		if ((in & 7) == 0) {
+			data = *bin;
+			bin++;
+		}
+		bit = (bit << 7) | (1 & (data >> (in & 7)));   //LSB first
+																	  //     bit = (bit<<7) | (1 & (bin[in/8]>>(in%8)));   //LSB first
+		switch (bit) {
+		case 0x00:  //10 10
+			out++;
+			raw[out]++;
+			break;
+		case 0x01:  //10 01
+		case 0x81:  //01 01
+			raw[out]++;
+			out++;
+			break;
+		case 0x80:  //01 10
+			raw[out] += 2;
+			break;
+		}
+	}
+	memset(raw + out, 3, rawSize - out);  //fill remainder with (undefined)
+}
+
+//check for gap at EOF
+bool looks_like_file_end(uint8_t *raw, int start, int rawSize) {
+	enum {
+		MIN_GAP = 976 - 100,
+		MAX_GAP = 976 + 100,
+	};
+	int zeros = 0;
+	int in = start;
+	for (; in<start + MAX_GAP && in<rawSize; in++) {
+		if (raw[in] == 1 && zeros>MIN_GAP) {
+			return true;
+		}
+		else if (raw[in] == 0) {
+			zeros++;
+		}
+		if (raw[in] != 0)
+			zeros = 0;
+	}
+	return in >= rawSize;  //end of disk = end of file!
+}
+
+//detect EOF by looking for good CRC.  in=start of file
+//returns 0 if nothing found
+int crc_detect(uint8_t *raw, int in, int rawSize) {
+	static uint32_t crc;
+	static uint8_t bitval;
+	static int out;
+	static bool match;
+
+	//local function ;)
+	struct {
+		void shift(uint8_t bit) {
+			crc |= bit << 16;
+			if (crc & 1) crc ^= 0x10810;
+			crc >>= 1;
+			bitval = bit;
+			out++;
+			if (crc == 0 && !(out & 7))  //on a byte bounary and CRC is valid
+				match = true;
+		}
+	} f;
+
+	crc = 0x8000;
+	bitval = 1;
+	out = 0;
+	do {
+		match = false;
+		switch (raw[in] | (bitval << 4)) {
+		case 0x11:
+			f.shift(0);
+		case 0x00:
+			f.shift(0);
+			break;
+		case 0x12:
+			f.shift(0);
+		case 0x01:
+		case 0x10:
+			f.shift(1);
+			break;
+		default:    //garbage / bad encoding
+			return 0;
+		}
+		in++;
+	} while (in<rawSize && !(match && looks_like_file_end(raw, in, rawSize)));
+	return match ? in : 0;
+}
+
+//gap end is known, backtrack and mark the start.  !! this assumes junk data exists between EOF and gap start
+static void mark_gap_start(uint8_t *raw, int gapEnd) {
+	int i;
+	for (i = gapEnd - 1; i >= 0 && raw[i] == 0; --i)
+	{
+	}
+	raw[i + 1] = 3;
+	printf("mark gap %X-%X\n", i + 1, gapEnd);
+}
+
+//For information only for now.  This checks for standard file format
+static void verify_block(uint8_t *bin, int start, int *reverse) {
+	enum { MAX_GAP = (976 + 100) / 8, MIN_GAP = (976 - 100) / 8 };
+	static const uint8_t next[] = { 0,2,3,4,3 };
+	static int last = 0;
+	static int lastLen = 0;
+	static int blockCount = 0;
+
+	int len = 0;
+	uint8_t type = bin[start];
+
+	printf("%d:%X", ++blockCount, type);
+
+	switch (type) {
+	case 1:
+		len = 0x38;
+		break;
+	case 2:
+		len = 2;
+		break;
+	case 3:
+		len = 16;
+		break;
+	case 4:
+		len = 1 + (bin[last + 13] | (bin[last + 14] << 8));
+		break;
+	default:
+		printf(" bad block (%X)\n", start);
+		return;
+	}
+	printf(" %X-%X / %X-%X(%X)", reverse[start], reverse[start + len], start, start + len, len);
+
+	if ((!last && type != 1) || (last && type != next[bin[last]]))
+		printf(", wrong filetype");
+	if (calc_crc(bin + start, len + 2) != 0)
+		printf(", bad CRC");
+	if (last && (last + lastLen + MAX_GAP)<start)
+		printf(", lost block?");
+	if (last + lastLen + MIN_GAP>start)
+		printf(", block overlap?");
+	//if(type==3 && ...)    //check other fields in file header?
+
+	printf("\n");
+	last = start;
+	lastLen = len;
+}
+
+//find gap + gap end.  returns bit following gap end, >=rawSize if not found.
+int nextGapEnd(uint8_t *raw, int in, int rawSize) {
+	enum { MIN_GAP = 976 - 100, };
+	int zeros = 0;
+	for (; (raw[in] != 1 || zeros<MIN_GAP) && in<rawSize; in++) {
+		if (raw[in] == 0) {
+			zeros++;
+		}
+		else {
+			zeros = 0;
+		}
+	}
+	return in + 1;
+}
+
+
+/*
+Try to create byte-for-byte, unadulterated representation of disk.  Use hints from the disk structure, given
+that it's probably a standard FDS game image but this should still make a best attempt regardless of the disk content.
+
+_bin and _binSize are updated on exit.  alloc'd buffer is returned in _bin, caller is responsible for freeing it.
+*/
+static void raw03_to_bin(uint8_t *raw, int rawSize, uint8_t **_bin, int *_binSize) {
+	enum {
+		BINSIZE = 0xa0000,
+		POST_GLITCH_GARBAGE = 16,
+		LONG_POST_GLITCH_GARBAGE = 64,
+		LONG_GAP = 900,   //976 typ.
+		SHORT_GAP = 16,
+	};
+	int in, out;
+	uint8_t *bin;
+	int *reverse;
+	int glitch;
+	int zeros;
+
+	bin = (uint8_t*)malloc(BINSIZE);
+	reverse = (int*)malloc(BINSIZE*sizeof(int));
+	memset(bin, 0, BINSIZE);
+
+	//--- assume any glitch is OOB, mark a run of zeros near a glitch as a gap start.
+
+	int junk = 0;
+	glitch = 0;
+	zeros = 0;
+	junk = 0;
+	for (in = 0; in<rawSize; in++) {
+		if (raw[in] == 3) {
+			glitch = in;
+			junk = 0;
+		}
+		else if (raw[in] == 1 || raw[in] == 2) {
+			junk = in;
+		}
+		else if (raw[in] == 0) {
+			zeros++;
+			if (glitch && junk && zeros>SHORT_GAP && (junk - glitch)<POST_GLITCH_GARBAGE) {
+				mark_gap_start(raw, in);
+				glitch = 0;
+			}
+		}
+		if (raw[in] != 0)
+			zeros = 0;
+	}
+
+	//--- Walk filesystem, mark blocks where something looks like a valid file
+
+	in = findFirstBlock(raw);
+	if (in>0) {
+		printf("header at %X\n", in);
+		mark_gap_start(raw, in - 1);
+	}
+	/*
+	do {
+	if(block_decode(..)) {
+	raw[head]=0xff;
+	raw[tail]=3;
+	}
+	next_gap(..);
+	} while(..);
+	*/
+	//--- Identify files by CRC. If data looks like it's surrounded by gaps and it has a valid CRC where we
+	//    expect one to be, assume it's a file and mark its start/end.
+
+	in = findFirstBlock(raw) + 1;
+	if (in>0) do {
+		out = crc_detect(raw, in, rawSize);
+		if (out) {
+			printf("crc found %X-%X\n", in, out);
+			raw[out] = 3;     //mark glitch (gap start)
+									//raw[in-1]=0xff;   //mark gap end 
+		}
+		in = nextGapEnd(raw, out ? out : in, rawSize);
+	} while (in<rawSize);
+
+	//--- mark gap start/end using glitches to find gap start
+
+	for (glitch = 0, zeros = 0, in = 0; in<rawSize; in++) {
+		if (raw[in] == 3) {
+			glitch = in;
+		}
+		else if (raw[in] == 1) {
+			if (zeros>LONG_GAP && (in - zeros - LONG_POST_GLITCH_GARBAGE)<glitch) {
+				mark_gap_start(raw, in);
+				raw[in] = 0xff;
+			}
+		}
+		else if (raw[in] == 0) {
+			zeros++;
+		}
+		if (raw[in] != 0)
+			zeros = 0;
+	}
+
+	//--- output
+
+	/*
+	FILE *f=fopen("raw03.bin","wb");
+	fwrite(raw,1,rawSize,f);
+	fclose(f);
+	*/
+
+	char bitval = 0;
+	int lastBlockStart = 0;
+	for (in = 0, out = 0; in<rawSize; in++) {
+		switch (raw[in] | (bitval << 4)) {
+		case 0x11:
+			out++;
+		case 0x00:
+			out++;
+			bitval = 0;
+			break;
+		case 0x12:
+			out++;
+		case 0x01:
+		case 0x10:
+			bin[out / 8] |= 1 << (out & 7);
+			out++;
+			bitval = 1;
+			break;
+		case 0xff:  //block end
+			if (lastBlockStart)
+				verify_block(bin, lastBlockStart, reverse);
+			bin[out / 8] = 0x80;
+			out = (out | 7) + 1;      //byte-align for readability
+			lastBlockStart = out / 8;
+			bitval = 1;
+			break;
+		case 0x02:
+			//printf("Encoding error @ %X(%X)\n",in,out/8);
+		default: //anything else (glitch)
+			out++;
+			bitval = 0;
+			break;
+		}
+		reverse[out / 8] = in;
+	}
+	//last block
+	verify_block(bin, lastBlockStart, reverse);
+
+	*_bin = bin;
+	*_binSize = out / 8 + 1;
+	free(reverse);
+}
+
+// TODO - only handles one side, files will need to be joined manually
+bool FDS_readDisk(char *filename_raw, char *filename_bin, char *filename_fds) {
+	enum { READBUFSIZE = 0x90000 };
+
+	FILE *f;
+	uint8_t *readBuf = NULL;
+	int result;
+	int bytesIn = 0;
+
+	//if(!(dev_readIO()&MEDIA_SET)) {
+	//    printf("Warning - Disk not inserted?\n");
+	//}
+	if (!dev.DiskReadStart()) {
+		printf("diskreadstart failed\n");
+		return false;
+	}
+
+	readBuf = (uint8_t*)malloc(READBUFSIZE);
+	do {
+		result = dev.DiskRead(readBuf + bytesIn);
+		bytesIn += result;
+		if (!(bytesIn % ((DISK_READMAX)* 32)))
+			printf(".");
+	} while (result == DISK_READMAX && bytesIn<READBUFSIZE - DISK_READMAX);
+	printf("\n");
+	if (result<0) {
+		printf("Read error.\n");
+		return false;
+	}
+
+	if (filename_raw) {
+		if ((f = fopen(filename_raw, "wb"))) {
+			fwrite(readBuf, 1, bytesIn, f);
+			fclose(f);
+			printf("Wrote %s\n", filename_raw);
+		}
+	}
+
+	raw_to_raw03(readBuf, bytesIn);
+
+	//decode to .fds
+	if (filename_fds) {
+		uint8_t *fds = (uint8_t*)malloc(FDSSIZE + 16);   //extra room for CRC junk
+		raw03_to_fds(readBuf, fds, bytesIn);
+		if ((f = fopen(filename_fds, "wb"))) {
+			fwrite(fds, 1, FDSSIZE, f);
+			fclose(f);
+			printf("Wrote %s\n", filename_fds);
+		}
+		free(fds);
+
+		//decode to .bin
+	}
+	else if (filename_bin) {
+		uint8_t *binBuf;
+		int binSize;
+
+		raw03_to_bin(readBuf, bytesIn, &binBuf, &binSize);
+		if ((f = fopen(filename_bin, "wb"))) {
+			fwrite(binBuf, 1, binSize, f);
+			fclose(f);
+			printf("Wrote %s\n", filename_bin);
+		}
+		free(binBuf);
+	}
+
+	free(readBuf);
+	return true;
+}
+
+static bool writeDisk2(uint8_t *bin, int binSize) {
+	//	printf("writeDisk2: sending bin image to adaptor, size = %d\n", binSize);
+
+	//	hexdump("bin", bin+ 3537, 256);
+
+	if (dev.Sram->Write(bin, 0, binSize) == false) {
+		printf("Sram write failed.\n");
+		return(false);
+	}
+
+	if (!dev.DiskWriteStart())
+		return false;
+
+	return(true);
+
+}
+
+bool FDS_writeDisk(char *filename) {
+	enum {
+		LEAD_IN = DEFAULT_LEAD_IN / 8,
+		DISKSIZE = 0x11000,               //whole disk contents including lead-in
+	};
+
+	uint8_t *inbuf = 0;       //.FDS buffer
+	uint8_t *bin = 0;         //.FDS with gaps/CRC
+	uint8_t *zero = 0;
+	int filesize;
+	int binSize;
+
+	if (!loadfile(filename, &inbuf, &filesize))
+	{
+		printf("Can't read %s\n", filename); return false;
+	}
+
+	bin = (uint8_t*)malloc(DISKSIZE);
+	zero = (uint8_t*)malloc(0x10000);
+	memset(zero, 0, 0x10000);
+
+	int inpos = 0, side = 0;
+	if (inbuf[0] == 'F')
+		inpos = 16;      //skip fwNES header
+
+	filesize -= (filesize - inpos) % FDSSIZE;  //truncate down to whole disk
+
+	char prompt;
+	do {
+		printf("Side %d\n", side + 1);
+
+		if (dev.Sram->Write(zero, 0, 0x10000) == false) {
+			printf("Sram write failed (zero).\n");
+			return(false);
+		}
+		memset(bin, 0, LEAD_IN);
+		binSize = fds_to_bin(bin + LEAD_IN, inbuf + inpos, DISKSIZE - LEAD_IN);
+		if (!binSize)
+			break;
+		if (!writeDisk2(bin, binSize + LEAD_IN))
+			break;
+		inpos += FDSSIZE;
+		side++;
+
+		//		printf("finished write, inpos = %d, filesize = %d, inbuf[inpos] = %X", inpos, filesize, inbuf[inpos]);
+		//prompt for disk change
+		prompt = 0;
+		if (inpos<filesize && inbuf[inpos] == 0x01) {
+			printf("\nPlease wait for disk activity to stop before pressing ENTER to write the next disk side.\n");
+			prompt = readKb();
+		}
+		else {
+			printf("\nDisk image sent to SRAM on device and is currently writing.\nPlease wait for disk activity to stop before removing disk.\n");
+		}
+	} while (prompt == 0x0d);
+
+	free(bin);
+	free(zero);
+	free(inbuf);
+	return true;
+}
+
+bool read_flash(char *filename_fds, int slot)
+{
+	enum {
+		RAWSIZE = SLOTSIZE * 8,
+	};
+
+	static uint8_t fwnesHdr[16] = { 0x46, 0x44, 0x53, 0x1a, };
+
+	FILE *f;
+	uint8_t *bin, *raw, *fds;
+	bool result = true;
+
+	f = fopen(filename_fds, "wb");
+	if (!f) {
+		printf("Can't create %s\n", filename_fds);
+		return false;
+	}
+
+	printf("Writing %s\n", filename_fds);
+	fwnesHdr[4] = 0;
+	fwrite(fwnesHdr, 1, sizeof(fwnesHdr), f);
+
+	bin = (uint8_t*)malloc(SLOTSIZE);     //single side from flash
+	raw = (uint8_t*)malloc(RAWSIZE);      //..to raw03
+	fds = (uint8_t*)malloc(FDSSIZE);      //..to FDS
+
+	int side = 0;
+	for (; side + slot <= (int)dev.Slots; side++) {
+		if (!dev.Flash->Read(bin,(slot + side)*SLOTSIZE, SLOTSIZE)) {
+			result = false;
+			break;
+		}
+
+		if (bin[0] == 0xff || (bin[0] != 0 && side != 0)) {    //stop on empty slot or next game
+			break;
+		}
+		else if (bin[0] == 0 && side == 0) {
+			printf("Warning! Not first side of game\n");
+		}
+
+		printf("Side %d\n", side + 1);
+		memset(bin, 0, FLASHHEADERSIZE);  //clear header, use it as lead-in
+		bin_to_raw03(bin, raw, SLOTSIZE, RAWSIZE);
+		if (!raw03_to_fds(raw, fds, RAWSIZE)) {
+			result = false;
+			break;
+		}
+		fwrite(fds, 1, FDSSIZE, f);
+		fwnesHdr[4]++;  //count sides written
+	}
+
+	fseek(f, 0, SEEK_SET);
+	fwrite(fwnesHdr, 1, sizeof(fwnesHdr), f);      //update disk side count
+
+	free(fds);
+	free(raw);
+	free(bin);
+	fclose(f);
+	return result;
+}
 
 bool write_flash(char *filename, int slot)
 {
@@ -232,22 +929,85 @@ bool write_flash(char *filename, int slot)
 	uint8_t *inbuf = 0;
 	uint8_t *outbuf = 0;
 	int filesize;
+	uint32_t i, j;
+	char *shortName;
+	TFlashHeader *headers = dev.FlashUtil->GetHeaders();
 
 	if (!loadfile(filename, &inbuf, &filesize))
 	{
 		printf("Can't read %s\n", filename); return false;
 	}
 
-	outbuf = new uint8_t[SLOTSIZE];
-
 	int pos = 0, side = 0;
 	if (inbuf[0] == 'F')
 		pos = 16;      //skip fwNES header
 
 	filesize -= (filesize - pos) % FDSSIZE;  //truncate down to whole disks
+														  //strip path from filename
+	shortName = strrchr(filename, '/');      // ...dir/file.fds
+#ifdef _WIN32
+	if (!shortName)
+		shortName = strrchr(filename, '\\');        // ...dir\file.fds
+	if (!shortName)
+		shortName = strchr(filename, ':');         // C:file.fds
+#endif
+	if (!shortName)
+		shortName = filename;
+	else
+		shortName++;
+
+	//check if an image of the same name is is already stored
+	for (i = 1; i < dev.Slots; i++) {
+		if (strncmp(shortName, (char*)headers[i].filename, 240) == 0) {
+			if (force == 0) {
+				printf("An image of the same name is already stored in flash.\n");
+				printf("If you really want to store this, add '--force' to the command line.\n");
+				delete[] inbuf;
+				return(false);
+			}
+		}
+	}
+
+	//try to find an area to store the disk image
+	if (slot == -1) {
+		uint32_t slots = filesize / FDSSIZE;
+
+		if (headers == 0) {
+			delete[] inbuf;
+			return(false);
+		}
+		for (i = 1; i < dev.Slots; i++) {
+
+			//check if slot is empty
+			if (headers[i].filename[0] == 0xFF) {
+
+				//check for more empty slots adjacent to this one
+				for (j = 1; j < slots; j++) {
+					if (headers[i + j].filename[0] != 0xFF) {
+						break;
+					}
+				}
+
+				//found an area sufficient to store this flash image
+				if (j == slots) {
+					slot = i;
+					break;
+				}
+
+			}
+		}
+		if (slot == -1) {
+			printf("Cannot find %d adjacent slots for storing disk image.\nPlease make room on the flash to store this disk image.\n", slots);
+			delete[] inbuf;
+			return(false);
+		}
+
+	}
+
+	outbuf = new uint8_t[SLOTSIZE];
 
 	while (pos<filesize && inbuf[pos] == 0x01) {
-		printf("Side %d\n", side + 1);
+		printf("Side %d", side + 1);
 		if (fds_to_bin(outbuf + FLASHHEADERSIZE, inbuf + pos, SLOTSIZE - FLASHHEADERSIZE)) {
 			memset(outbuf, 0, FLASHHEADERSIZE);
 			uint32_t chksum = chksum_calc(outbuf + FLASHHEADERSIZE, SLOTSIZE - FLASHHEADERSIZE);
@@ -259,23 +1019,13 @@ bool write_flash(char *filename, int slot)
 			outbuf[245] = DEFAULT_LEAD_IN / 256;
 
 			if (side == 0) {
-				//strip path from filename
-				char *shortName = strrchr(filename, '/');      // ...dir/file.fds
-#ifdef _WIN32
-				if (!shortName)
-					shortName = strrchr(filename, '\\');        // ...dir\file.fds
-				if (!shortName)
-					shortName = strchr(filename, ':');         // C:file.fds
-#endif
-				if (!shortName)
-					shortName = filename;
-				else
-					shortName++;
-				//                utf8_to_utf16((uint16_t*)outbuf, shortName, FILENAMELENGTH*2);
-				//                ((uint16_t*)outbuf)[FILENAMELENGTH-1]=0;
 				strncpy((char*)outbuf, shortName, 240);
 			}
-			dev.Flash->Write(outbuf, (slot + side)*SLOTSIZE, SLOTSIZE);
+			if (dev.Flash->Write(outbuf, (slot + side)*SLOTSIZE, SLOTSIZE, cli_progress) == false) {
+				printf("error.\n");
+				break;
+			}
+			printf("done.\n");
 		}
 		pos += FDSSIZE;
 		side++;
@@ -286,73 +1036,119 @@ bool write_flash(char *filename, int slot)
 	return true;
 }
 
-//list disks storedin flash
-bool fds_list()
+char loaderid[] = "]|<=--LOADER.FDS--=>|[";
+
+bool DetectLoader(uint8_t *buf)
 {
-	uint8_t buf[256];
-	uint32_t slot;
+	int pos, len, count;
+	uint8_t byte;
+
+	for (pos = 0; pos<65500;) {
+
+		//read a byte
+		byte = buf[pos++];
+
+		//first byte matches
+		if (byte == loaderid[0]) {
+			len = strlen(loaderid);
+			for (count = 0; byte == loaderid[count] && count < len; count++) {
+				byte = buf[pos + count];
+			}
+			if (count == len) {
+				len = buf[pos + count];
+				printf("Valid loader image found, version %d.%02d\n", len / 100, len % 100);
+				return(true);
+			}
+		}
+	}
+	return(false);
+}
+
+bool loader_update(char *fn)
+{
+	bool ret = false;
+	uint8_t *buf;
+	int len;
+
+	if (loadfile(fn, &buf, &len) == false) {
+		printf("Error loading file '%s'\n", fn);
+		return(false);
+	}
+	if (DetectLoader(buf) == false) {
+		printf("Specified image doesnt appear to be the loader.\n");
+	}
+	else {
+		ret = write_flash(fn, 0);
+	}
+	delete[] buf;
+	return(ret);
+}
+
+bool fds_list(int verbose)
+{
+	TFlashHeader *headers = dev.FlashUtil->GetHeaders();
+	uint32_t i;
 	int side = 0, empty = 0;
 
-	//loop thru all possible disk sides stored on flash
-	for (slot = 1; slot < dev.Slots; slot++) {
+	if (headers == 0) {
+		return(false);
+	}
 
-		//read header from flash
-		if (dev.Flash->Read(buf, slot * SLOTSIZE, 256) == false)
-			return(false);
+	for (i = 1; i < dev.Slots; i++) {
+		uint8_t *buf = headers[i].filename;
 
-		//empty slot
-		if (buf[0] == 0xFF) {          //empty
-			empty++;
+		//verbose listing
+		if (verbose) {
+			if (buf[0] == 0xFF) {          //empty
+				printf("%d:\n", i);
+				side = 0;
+				empty++;
+			}
+			else if (buf[0] != 0) {      //filename present
+				printf("%d: %s\n", i, buf);
+				side = 1;
+			}
+			else if (!side) {          //first side is missing
+				printf("%d: ?\n", i);
+			}
+			else {                    //next side
+				printf("%d:    Side %d\n", i, ++side);
+			}
 		}
 
-		//filename is here
-		else if (buf[0] != 0) {
-			printf(" . %s\n", buf);
+		//short listing
+		else {
+			if (buf[0] == 0xFF) {          //empty
+				empty++;
+			}
+
+			//filename is here
+			else if (buf[0] != 0) {
+				printf(" . %s\n", buf);
+			}
 		}
 	}
 	printf("\nEmpty slots: %d\n", empty);
 	return(true);
 }
 
-bool fds_list_verbose()
+bool convert_image(char *infile, char *outfile, char *type)
 {
-	uint8_t buf[256];
-	uint32_t slot;
-	int side = 0;
+	CDiskImage image;
 
-	//loop thru all possible disk sides stored on flash
-	for (slot = 1; slot < dev.Slots; slot++) {
-
-		//read header from flash
-		if (dev.Flash->Read(buf, slot * SLOTSIZE, 256) == false)
-			return(false);
-
-		if (buf[0] == 0xFF) {          //empty
-			printf("%d:\n", slot);
-			side = 0;
-		}
-		else if (buf[0] != 0) {      //filename present
-			printf("%d: %s\n", slot, buf);
-			side = 1;
-		}
-		else if (!side) {          //first side is missing
-			printf("%d: ?\n", slot);
-		}
-		else {                    //next side
-			printf("%d:    Side %d\n", slot, ++side);
-		}
-	}
+	image.Load(infile);
 	return(true);
 }
 
 int main(int argc, char *argv[])
 {
-	int i;
-	bool success;
+	int i, slot;
+	bool success = false;
 	char *param = 0;
 	char *param2 = 0;
+	char *param3 = 0;
 
-	printf("fdsemu-cli v%d.%d by James Holodnak, portions based on code by loopy\n", VERSION / 100, VERSION % 100);
+	printf("fdsemu-cli v%d.%d.%d by James Holodnak, based on code by loopy\n", VERSION / 100, VERSION % 100, BUILDNUM);
 
 	if (argc < 2) {
 		usage(argv[0]);
@@ -362,20 +1158,58 @@ int main(int argc, char *argv[])
 	//parse command line
 	for (i = 1; i < argc; i++) {
 
-		//use more verbose output
-		if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
-			verbose = 1;
-		}
-
 		//get program usage
 		if (strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
 			usage(argv[0]);
 			return(1);
 		}
 
+		//use more verbose output
+		else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+			verbose = 1;
+		}
+
+		//force the operation, whatever it may be
+		else if (/*strcmp(argv[i], "-f") == 0 ||*/ strcmp(argv[i], "--force") == 0) {
+			force = 1;
+		}
+
 		//list disk images
 		else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--list") == 0) {
 			action = ACTION_LIST;
+		}
+
+		//read disk image to disk
+		else if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--read-disk") == 0) {
+			if ((i + 1) >= argc) {
+				printf("\nPlease specify a filename.\n");
+				return(1);
+			}
+			action = ACTION_READDISK;
+			param = argv[++i];
+			if (argv[i] && argv[i][0] != '-') {
+				param2 = argv[++i];
+			}
+		}
+
+		//read disk image to disk
+		else if (strcmp(argv[i], "-R") == 0 || strcmp(argv[i], "--read-disk-fds") == 0) {
+			if ((i + 1) >= argc) {
+				printf("\nPlease specify a filename.\n");
+				return(1);
+			}
+			action = ACTION_READDISK;
+			param3 = argv[++i];
+		}
+
+		//write disk image to disk
+		else if (strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--write-disk") == 0) {
+			if ((i + 1) >= argc) {
+				printf("\nPlease specify a filename.\n");
+				return(1);
+			}
+			action = ACTION_WRITEDISK;
+			param = argv[++i];
 		}
 
 		//write disk image to flash
@@ -386,9 +1220,42 @@ int main(int argc, char *argv[])
 			}
 			action = ACTION_WRITEFLASH;
 			param = argv[++i];
+			if (argv[i] && argv[i][0] != '-') {
+				param2 = argv[++i];
+			}
+		}
+
+		//read disk image from flash
+		else if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--save-flash") == 0) {
+			if ((i + 2) >= argc) {
+				printf("\nPlease specify a filename and slot number.\n");
+				return(1);
+			}
+			action = ACTION_READFLASH;
+			param = argv[++i];
 			if (argv[i][0] != '-') {
 				param2 = argv[++i];
 			}
+		}
+
+		//erase disk image from flash
+		else if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--erase-flash") == 0) {
+			if ((i + 1) >= argc) {
+				printf("\nPlease specify a slot number (use --list --verbose to see flash contents).\n");
+				return(1);
+			}
+			action = ACTION_ERASEFLASH;
+			param = argv[++i];
+		}
+
+		//update loader
+		else if (strcmp(argv[i], "-u") == 0 || strcmp(argv[i], "--update-loader") == 0) {
+			if ((i + 1) >= argc) {
+				printf("\nPlease specify a filename for the loader to update with.\n");
+				return(1);
+			}
+			action = ACTION_UPDATELOADER;
+			param = argv[++i];
 		}
 
 		//update firmware
@@ -400,7 +1267,6 @@ int main(int argc, char *argv[])
 			action = ACTION_UPDATEFIRMWARE;
 			param = argv[++i];
 		}
-
 	}
 
 	if (dev.Open() == false) {
@@ -408,38 +1274,69 @@ int main(int argc, char *argv[])
 		return(2);
 	}
 
-	printf(" . Device opened: %s, %dMB flash (firmware build %d, flashID %06X)\n", dev.DeviceName, dev.FlashSize / 0x100000, dev.Version, dev.FlashID);
+	printf("\n");
+	printf(" Device opened: %s, %dMB flash (firmware build %d, flashID %06X)\n", dev.DeviceName, dev.FlashSize / 0x100000, dev.Version, dev.FlashID);
+	printf("\n");
 
 	switch (action) {
 
-	default:
-		success = false;
-		break;
-
 	case ACTION_NONE:
-		printf("\nNo operation specified.\n");
+		printf("No operation specified.\n");
 		success = true;
 		break;
 
 	case ACTION_LIST:
-		printf("\nListing disks stored in flash:\n");
-		if (verbose) {
-			success = fds_list_verbose();
-		}
-		else {
-			success = fds_list();
-		}
+		printf("Listing disks stored in flash:\n");
+		success = fds_list(verbose);
 		break;
 
 	case ACTION_UPDATEFIRMWARE:
 		success = firmware_update(param);
 		break;
 
-	case ACTION_WRITEFLASH:
-		int slot = atoi(param2);
-		success = write_flash(param,slot);
+	case ACTION_UPDATELOADER:
+		success = loader_update(param);
 		break;
 
+	case ACTION_WRITEFLASH:
+		printf("Writing disk image to flash...\n");
+		success = write_flash(param, (param2 == 0) ? -1 : atoi(param2));
+		break;
+
+	case ACTION_READFLASH:
+		printf("Reading disk image from flash...\n");
+		success = read_flash(param, atoi(param2));
+		break;
+
+	case ACTION_ERASEFLASH:
+		//erase all slots
+		if (strcmp(param, "all") == 0) {
+			if (force == 0) {
+				printf("This operation will erase all flash disk slots.\nTo confirm this operation please add --force to the command line.\n\n");
+			}
+			else {
+				printf("Erasing all slots from flash...\n");
+				success = dev.Flash->Erase(SLOTSIZE, dev.FlashSize - SLOTSIZE);
+			}
+		}
+
+		//erase one slot
+		else {
+			printf("Erase disk image from flash...\n");
+			slot = atoi(param);
+			success = dev.Flash->Erase(slot * SLOTSIZE, SLOTSIZE);
+		}
+		break;
+
+	case ACTION_WRITEDISK:
+		printf("Writing disk from file...\n");
+		success = FDS_writeDisk(param);
+		break;
+
+	case ACTION_READDISK:
+		printf("Reading disk to file...\n");
+		success = FDS_readDisk(param, param2, param3);
+		break;
 	}
 
 	dev.Close();
@@ -450,5 +1347,6 @@ int main(int argc, char *argv[])
 	else {
 		printf("Operation failed.\n");
 	}
+
 	return(0);
 }

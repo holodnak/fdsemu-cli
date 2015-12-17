@@ -29,13 +29,41 @@ bool CFlash::Read(uint8_t *buf, uint32_t addr, int size)
 	return true;
 }
 
-bool CFlash::Write(uint8_t *buf, uint32_t addr, int size)
+bool CFlash::Write(uint8_t *buf, uint32_t addr, int size, TCallback cb, void *user)
 {
 	int i;
 
-	printf("CFlash::Write:  writing data at $%X, size = $%X (%d)\n", addr,size,size);
 	if (size % SECTORSIZE) {
 		printf("CFlash::Write:  cannot write data, size must be a multiple of %d\n", SECTORSIZE);
+		return(false);
+	}
+
+	if (Erase(addr, size) == false) {
+		return(false);
+	}
+
+	//write pages
+	for (i = 0; i < size; i += PAGESIZE) {
+		if (PageProgram(addr + i, buf + i) == false) {
+			return(false);
+		}
+		if ((addr + i) % 0x1000 == 0) {
+			if (cb) {
+				cb(user, i);
+			}
+//			printf(".");
+		}
+	}
+
+	return(true);
+}
+
+bool CFlash::Erase(uint32_t addr, int size)
+{
+	int i;
+
+	if (size % SECTORSIZE) {
+		printf("CFlash::Erase:  cannot erase, size must be a multiple of %d\n", SECTORSIZE);
 		return(false);
 	}
 
@@ -45,17 +73,6 @@ bool CFlash::Write(uint8_t *buf, uint32_t addr, int size)
 			return(false);
 		}
 	}
-
-	//write pages
-	for (i = 0; i < size; i += PAGESIZE) {
-		if (PageProgram(addr + i, buf + i) == false) {
-			return(false);
-		}
-		if ((addr + i) % 0x1000 == 0) {
-			printf(".");
-		}
-	}
-
 	return(true);
 }
 
@@ -119,7 +136,6 @@ bool CFlash::EraseSector(uint32_t addr)
 		return false;
 	cmd[1] = addr >> 16;
 	cmd[2] = addr >> 8;
-	printf("CFlash::EraseSector: erasing from address $%X\n", addr);
 	if (!dev->FlashWrite(cmd, 4, 1, 0))
 		return false;
 	return WaitBusy(1600);

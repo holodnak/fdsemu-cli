@@ -1,6 +1,6 @@
 #pragma once
 
-#include <stdint.h>
+#include "DiskSide.h"
 
 class CDiskImage
 {
@@ -8,11 +8,22 @@ private:
 
 protected:
 
-	//disk data in different formats
-	uint8_t *fds, *bin, *raw03;
+	//disk sides
+	CDiskSide *sides;
 
 	//number of disk sides
-	int sides;
+	int numsides;
+
+protected:
+
+	//load disk image data buffer, autodetect image format
+	bool LoadFds(uint8_t *buf, int len);
+
+	//load disk image data buffer, autodetect image format
+	bool LoadBin(uint8_t *buf, int len);
+
+	//load disk image data buffer, autodetect image format
+	bool LoadRaw(uint8_t *buf, int len);
 
 public:
 	CDiskImage();
@@ -21,15 +32,6 @@ public:
 	//load disk image from file
 	bool Load(char *filename);
 
-	//save disk image to file
+	//save disk image to file, fwNES format only
 	bool Save(char *filename);
-
-	//returns pointer to data in fwNES format
-	uint8_t *GetFDS();
-
-	//returns pointer to data in bin format
-	uint8_t *GetBin();
-
-	//returns pointer to data in raw03 format
-	uint8_t *GetRaw();
 };

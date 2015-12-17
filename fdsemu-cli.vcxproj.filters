@@ -24,10 +24,25 @@
     <ClInclude Include="version.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Flash.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DiskImage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="System.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DiskSide.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FlashUtil.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="hidapi\hidapi\hidapi.h">
       <Filter>hidapi</Filter>
     </ClInclude>
-    <ClInclude Include="Flash.h">
+    <ClInclude Include="Sram.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -38,10 +53,25 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Flash.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DiskImage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="System.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DiskSide.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="FlashUtil.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="hidapi\windows\hid.c">
       <Filter>hidapi</Filter>
     </ClCompile>
-    <ClCompile Include="Flash.cpp">
+    <ClCompile Include="Sram.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
