@@ -121,6 +121,10 @@ uint32_t CDevice::GetFlashSize()
 		case 0x1740EF: // W25Q64FV
 		case 0x174001: // S25FL164K
 			return(0x800000);
+
+		//128mbit flash
+		case 0x1840EF: // W25Q128FV
+			return(0x1000000);
 	}
 
 	//unknown flash chip

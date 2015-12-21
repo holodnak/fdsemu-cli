@@ -1,3 +1,7 @@
+/*
+auto disk search?  wrote disk to slot 0...ensure more security of the loader's slot
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +25,7 @@ enum {
 	ACTION_WRITEDISK,
 	ACTION_UPDATEFIRMWARE,
 	ACTION_UPDATELOADER,
+	ACTION_CHIPERASE,
 };
 
 void cli_progress(void *user, int n)
@@ -153,7 +158,7 @@ static void usage(char *argv0)
 {
 	char usagestr[] =
 		"  Flash operations:\n"
-		"    -f file.fds [1..n]            write image to flash slot [1..n]\n"
+		"    -f file.fds [1..n]            write image flash, optional specify slot\n"
 		"    -s file.fds [1..n]            save image from flash slot [1..n]\n"
 		"    -e [1..n] | all               erase slot [1..n] or erase all slots\n"
 		"    -l                            list images stored on flash\n"
@@ -1004,6 +1009,17 @@ bool write_flash(char *filename, int slot)
 
 	}
 
+	if (slot == -2) {
+		printf("Updating loader...\n");
+		slot = 0;
+	}
+
+	else if (slot == 0) {
+		printf("Cannot write to slot 0.\n");
+		delete[] inbuf;
+		return(false);
+	}
+
 	outbuf = new uint8_t[SLOTSIZE];
 
 	while (pos<filesize && inbuf[pos] == 0x01) {
@@ -1078,7 +1094,7 @@ bool loader_update(char *fn)
 		printf("Specified image doesnt appear to be the loader.\n");
 	}
 	else {
-		ret = write_flash(fn, 0);
+		ret = write_flash(fn, 0x10000);
 	}
 	delete[] buf;
 	return(ret);
@@ -1140,6 +1156,17 @@ bool convert_image(char *infile, char *outfile, char *type)
 	return(true);
 }
 
+bool chip_erase()
+{
+	uint8_t cmd[] = { CMD_CHIPERASE,0,0,0 };
+
+	if (!dev.Flash->WriteEnable())
+		return false;
+	if (!dev.FlashWrite(cmd, 1, 1, 0))
+		return false;
+	return(dev.Flash->WaitBusy(200 * 1000));
+}
+
 int main(int argc, char *argv[])
 {
 	int i, slot;
@@ -1172,6 +1199,11 @@ int main(int argc, char *argv[])
 		//force the operation, whatever it may be
 		else if (/*strcmp(argv[i], "-f") == 0 ||*/ strcmp(argv[i], "--force") == 0) {
 			force = 1;
+		}
+
+		//erase entire chip
+		else if (/*strcmp(argv[i], "-f") == 0 ||*/ strcmp(argv[i], "--chip-erase") == 0) {
+			action = ACTION_CHIPERASE;
 		}
 
 		//list disk images
@@ -1336,6 +1368,11 @@ int main(int argc, char *argv[])
 	case ACTION_READDISK:
 		printf("Reading disk to file...\n");
 		success = FDS_readDisk(param, param2, param3);
+		break;
+
+	case ACTION_CHIPERASE:
+		printf("Erasing entire flash chip...\n");
+		success = chip_erase();
 		break;
 	}
 
