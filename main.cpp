@@ -26,6 +26,8 @@ enum {
 	ACTION_UPDATEFIRMWARE,
 	ACTION_UPDATELOADER,
 	ACTION_CHIPERASE,
+	ACTION_SELFTEST,
+	ACTION_VERIFY,
 };
 
 void cli_progress(void *user, int n)
@@ -243,10 +245,23 @@ bool firmware_update(char *filename)
 	//insert checksum into the image
 	buf32[(0x8000 - 4) / 4] = chksum;
 
-	printf("uploading new firmware");
-	if (!dev.Flash->Write(buf, 0x8000, 0x8000, cli_progress)) {
-		printf("Write failed.\n");
-		return false;
+	//newer firmwares store the firmware image in sram to be updated
+	if (dev.Version > 792) {
+		printf("uploading new firmware to sram\n");
+		if (!dev.Sram->Write(buf, 0x0000, 0x8000)) {
+			printf("Write failed.\n");
+			return false;
+		}
+	}
+
+	//older firmware store the firmware image into flash memory
+	else {
+		printf("uploading new firmware to flash");
+		if (!dev.Flash->Write(buf, 0x8000, 0x8000, cli_progress)) {
+			printf("Write failed.\n");
+			return false;
+		}
+		printf("\n");
 	}
 	delete[] buf;
 
@@ -790,7 +805,7 @@ bool FDS_readDisk(char *filename_raw, char *filename_bin, char *filename_fds) {
 static bool writeDisk2(uint8_t *bin, int binSize) {
 	//	printf("writeDisk2: sending bin image to adaptor, size = %d\n", binSize);
 
-	//	hexdump("bin", bin+ 3537, 256);
+//		hexdump("bin", bin+ 3537, 256);
 
 	if (dev.Sram->Write(bin, 0, binSize) == false) {
 		printf("Sram write failed.\n");
@@ -1014,7 +1029,7 @@ bool write_flash(char *filename, int slot)
 		slot = 0;
 	}
 
-	else if (slot == 0) {
+	else if (slot == 0 && dev.Version <= 792) {
 		printf("Cannot write to slot 0.\n");
 		delete[] inbuf;
 		return(false);
@@ -1110,7 +1125,14 @@ bool fds_list(int verbose)
 		return(false);
 	}
 
-	for (i = 1; i < dev.Slots; i++) {
+	if (dev.Version <= 792) {
+		i = 1;
+	}
+	else {
+		i = 0;
+	}
+
+	for (; i < dev.Slots; i++) {
 		uint8_t *buf = headers[i].filename;
 
 		//verbose listing
@@ -1165,6 +1187,68 @@ bool chip_erase()
 	if (!dev.FlashWrite(cmd, 1, 1, 0))
 		return false;
 	return(dev.Flash->WaitBusy(200 * 1000));
+}
+
+bool verify_device()
+{
+	uint8_t *buf, *buf2;
+	int i;
+
+	bool ok = false;
+
+	buf = new uint8_t[0x10000];
+	buf2 = new uint8_t[0x10000];
+
+	do {
+		printf("Testing flash read/write...");
+
+		//read data first (to preserve data)
+		dev.Flash->Read(buf, 0, 0x10000);
+
+		//generate simple test pattern
+		for (i = 0; i < 0x10000; i++) {
+			buf2[i] = (uint8_t)i;
+		}
+
+		//write simple test pattern, then read it back
+		dev.Flash->Write(buf2, 0, 0x10000);
+		dev.Flash->Read(buf2, 0, 0x10000);
+
+		//verify flash data
+		for (i = 0; i < 0x10000; i++) {
+			if (buf2[i] != (uint8_t)i) {
+				printf("error\n");
+				break;
+			}
+		}
+
+		//write old data back
+		dev.Flash->Write(buf, 0, 0x10000);
+		printf("ok\n");
+
+		printf("Testing sram read/write...");
+		//write test pattern to sram, then read it back
+		dev.Sram->Write(buf2, 0, 0x10000);
+		dev.Sram->Read(buf2, 0, 0x10000);
+
+		//verify sram data
+		for (i = 0; i < 0x10000; i++) {
+			if (buf2[i] != (uint8_t)i) {
+				printf("error\n");
+				break;
+			}
+		}
+		printf("ok\n");
+
+		printf("Asking device to do a self-test...\n");
+		ok = dev.Selftest();
+		printf("If FDSemu LED indicator is RED, the self-test has failed.\n");
+
+	} while (0);
+
+	delete[] buf;
+	delete[] buf2;
+	return(ok);
 }
 
 int main(int argc, char *argv[])
@@ -1280,6 +1364,11 @@ int main(int argc, char *argv[])
 			param = argv[++i];
 		}
 
+		//verify that the loader is in place and sram/flash is ok
+		else if (strcmp(argv[i], "--verify") == 0) {
+			action = ACTION_VERIFY;
+		}
+
 		//update loader
 		else if (strcmp(argv[i], "-u") == 0 || strcmp(argv[i], "--update-loader") == 0) {
 			if ((i + 1) >= argc) {
@@ -1298,6 +1387,11 @@ int main(int argc, char *argv[])
 			}
 			action = ACTION_UPDATEFIRMWARE;
 			param = argv[++i];
+		}
+
+		//self test
+		else if (strcmp(argv[i], "-T") == 0 || strcmp(argv[i], "--self-test") == 0) {
+			action = ACTION_SELFTEST;
 		}
 	}
 
@@ -1373,6 +1467,16 @@ int main(int argc, char *argv[])
 	case ACTION_CHIPERASE:
 		printf("Erasing entire flash chip...\n");
 		success = chip_erase();
+		break;
+
+	case ACTION_SELFTEST:
+		printf("Self test...\n");
+		success = dev.Selftest();
+		break;
+
+	case ACTION_VERIFY:
+		printf("Verify integrity of device...\n");
+		success = verify_device();
 		break;
 	}
 

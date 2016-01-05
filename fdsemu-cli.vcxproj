@@ -28,13 +28,13 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>v140_xp</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>v140_xp</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -88,6 +88,7 @@
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\projects\fdsemu-cli\..\fdsemu-lib;C:\projects\fdsemu-cli;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -123,6 +124,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\projects\fdsemu-cli\..\fdsemu-lib;C:\projects\fdsemu-cli;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -156,26 +158,26 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="Device.h" />
-    <ClInclude Include="DiskImage.h" />
-    <ClInclude Include="DiskSide.h" />
-    <ClInclude Include="Flash.h" />
-    <ClInclude Include="FlashUtil.h" />
+    <ClInclude Include="..\fdsemu-lib\Device.h" />
+    <ClInclude Include="..\fdsemu-lib\DiskImage.h" />
+    <ClInclude Include="..\fdsemu-lib\DiskSide.h" />
+    <ClInclude Include="..\fdsemu-lib\Flash.h" />
+    <ClInclude Include="..\fdsemu-lib\FlashUtil.h" />
+    <ClInclude Include="..\fdsemu-lib\Sram.h" />
+    <ClInclude Include="..\fdsemu-lib\System.h" />
     <ClInclude Include="hidapi\hidapi\hidapi.h" />
-    <ClInclude Include="Sram.h" />
-    <ClInclude Include="System.h" />
     <ClInclude Include="version.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Device.cpp" />
-    <ClCompile Include="DiskImage.cpp" />
-    <ClCompile Include="DiskSide.cpp" />
-    <ClCompile Include="Flash.cpp" />
-    <ClCompile Include="FlashUtil.cpp" />
+    <ClCompile Include="..\fdsemu-lib\Device.cpp" />
+    <ClCompile Include="..\fdsemu-lib\DiskImage.cpp" />
+    <ClCompile Include="..\fdsemu-lib\DiskSide.cpp" />
+    <ClCompile Include="..\fdsemu-lib\Flash.cpp" />
+    <ClCompile Include="..\fdsemu-lib\FlashUtil.cpp" />
+    <ClCompile Include="..\fdsemu-lib\Sram.cpp" />
+    <ClCompile Include="..\fdsemu-lib\System.cpp" />
     <ClCompile Include="hidapi\windows\hid.c" />
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="Sram.cpp" />
-    <ClCompile Include="System.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

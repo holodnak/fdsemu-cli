@@ -16,63 +16,66 @@
     <Filter Include="hidapi">
       <UniqueIdentifier>{33b1d610-6600-439f-8133-604d3c7e653f}</UniqueIdentifier>
     </Filter>
+    <Filter Include="fdsemu-lib">
+      <UniqueIdentifier>{f93ddd98-1c15-4ca3-820a-23ec72abfacb}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Device.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="version.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Flash.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DiskImage.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="System.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DiskSide.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="FlashUtil.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="hidapi\hidapi\hidapi.h">
       <Filter>hidapi</Filter>
     </ClInclude>
-    <ClInclude Include="Sram.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="..\fdsemu-lib\Device.h">
+      <Filter>fdsemu-lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\fdsemu-lib\DiskImage.h">
+      <Filter>fdsemu-lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\fdsemu-lib\DiskSide.h">
+      <Filter>fdsemu-lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\fdsemu-lib\Flash.h">
+      <Filter>fdsemu-lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\fdsemu-lib\FlashUtil.h">
+      <Filter>fdsemu-lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\fdsemu-lib\Sram.h">
+      <Filter>fdsemu-lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\fdsemu-lib\System.h">
+      <Filter>fdsemu-lib</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Device.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Flash.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DiskImage.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="System.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DiskSide.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="FlashUtil.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="hidapi\windows\hid.c">
       <Filter>hidapi</Filter>
     </ClCompile>
-    <ClCompile Include="Sram.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="..\fdsemu-lib\Device.cpp">
+      <Filter>fdsemu-lib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\fdsemu-lib\DiskImage.cpp">
+      <Filter>fdsemu-lib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\fdsemu-lib\DiskSide.cpp">
+      <Filter>fdsemu-lib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\fdsemu-lib\Flash.cpp">
+      <Filter>fdsemu-lib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\fdsemu-lib\FlashUtil.cpp">
+      <Filter>fdsemu-lib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\fdsemu-lib\Sram.cpp">
+      <Filter>fdsemu-lib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\fdsemu-lib\System.cpp">
+      <Filter>fdsemu-lib</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
