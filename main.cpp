@@ -19,7 +19,9 @@ enum {
 	ACTION_CONVERT,
 	ACTION_LIST,
 	ACTION_READFLASH,
+	ACTION_READFLASHRAW,
 	ACTION_WRITEFLASH,
+	ACTION_WRITEDOCTORFLASH,
 	ACTION_ERASEFLASH,
 	ACTION_READDISK,
 	ACTION_WRITEDISK,
@@ -30,14 +32,14 @@ enum {
 	ACTION_VERIFY,
 };
 
-void cli_progress(void *user, int n)
+void cli_progress(void *user, uint32_t n)
 {
 	printf(".");
 }
 
 __inline uint8_t raw_to_raw03_byte(uint8_t raw)
 {
-	if (raw < 0x48)
+	if (raw < 0x40)
 		return(3);
 	else if (raw < 0x70)
 		return(0);
@@ -77,6 +79,7 @@ void copy_block(uint8_t *dst, uint8_t *src, int size) {
 	uint32_t crc = calc_crc(dst + 1, size + 2);
 	dst[size + 1] = crc;
 	dst[size + 2] = crc >> 8;
+//	printf("copying blocks, size = %d, crc = %04X\n", size + 2, crc);
 }
 
 //Adds GAP + GAP end (0x80) + CRCs to .FDS image
@@ -115,6 +118,54 @@ int fds_to_bin(uint8_t *dst, uint8_t *src, int dstSize) {
 		copy_block(dst + o, src + i, size);
 		i += size;
 		o += size + 3 + GAP;
+	}
+	return o;
+}
+
+/*
+Adds GAP + GAP end (0x80) + CRCs to Game Doctor image.  Returns size (0=error)
+
+GD format:
+0x??, 0x??, 0x8N      3rd byte seems to be # of files on disk, same as block 2.
+repeat to end of disk {
+N bytes (block contents, same as .fds)
+2 dummy CRC bytes (0x00 0x00)
+}
+*/
+int gameDoctor_to_bin(uint8_t *dst, uint8_t *src, int dstSize) {
+	//check for *NINTENDO-HVC* at 0x03 and second block following CRC
+	if (src[3] != 0x01 || src[4] != 0x2a || src[5] != 0x4e || src[0x3d] != 0x02) {
+		printf("Not GD format.\n");
+		return 0;
+	}
+	memset(dst, 0, dstSize);
+
+	//block type 1
+	int i = 3, o = 0;
+	copy_block(dst + o, src + i, 0x38);
+	i += 0x38 + 2;        //block + dummy crc
+	o += 0x38 + 3 + GAP;    //gap end + block + crc + gap
+
+									//block type 2
+	copy_block(dst + o, src + i, 2);
+	i += 2 + 2;
+	o += 2 + 3 + GAP;
+
+	//block type 3+4...
+	while (src[i] == 3) {
+		int size = (src[i + 13] | (src[i + 14] << 8)) + 1;
+		if (o + 16 + 3 + GAP + size + 3 > dstSize) {    //end + block3 + crc + gap + end + block4 + crc
+			printf("Out of space (%d bytes short), adjust GAP size?\n", (o + 16 + 3 + GAP + size + 3) - dstSize);
+			return 0;
+		}
+		copy_block(dst + o, src + i, 16);
+		i += 16 + 2;
+		o += 16 + 3 + GAP;
+
+		copy_block(dst + o, src + i, size);
+		i += size + 2;
+		o += size + 3 + GAP;
+//		printf("copying blocks 3+4, size3 = %d, size4 = %d\n", 16 + 3, size + 3);
 	}
 	return o;
 }
@@ -160,7 +211,8 @@ static void usage(char *argv0)
 {
 	char usagestr[] =
 		"  Flash operations:\n"
-		"    -f file.fds [1..n]            write image flash, optional specify slot\n"
+		"    -f file.fds [1..n]            write image to flash, optional to specify slot\n"
+		"    -F file.A                     write doctor images to flash (only specify first disk file)\n"
 		"    -s file.fds [1..n]            save image from flash slot [1..n]\n"
 		"    -e [1..n] | all               erase slot [1..n] or erase all slots\n"
 		"    -l                            list images stored on flash\n"
@@ -171,7 +223,6 @@ static void usage(char *argv0)
 		"    -w file.fds                   write disk from fwNES format disk image\n"
 		"\n"
 		"  Other operations:\n"
-		"    -u loader.fds                 update loader from fwNES loader image\n"
 		"    -U firmware.bin               update firmware from firmware image\n"
 		"\n"
 		"  Options:\n"
@@ -181,6 +232,7 @@ static void usage(char *argv0)
 		"Commands:\n\n"
 		" Flash operations:\n\n"
 		"  -f, --write-flash [files...]     write image(s) to flash\n"
+		"  -F, --write-doctor [files...]    write doctor disk image sides to flash\n"
 		"  -s, --save-flash [file] [1..n]   save image from flash slot [1..n]\n"
 		"  -e, --erase-slot [1..n]          erase flash disk image in slot [1..n]\n"
 		"  -d, --dump [file] [addr] [size]  dump flash from starting addr, size bytes\n"
@@ -203,22 +255,15 @@ static void usage(char *argv0)
 		"  -t, --type [type]                specify file type, valid types: fds bin raw\n"
 		"\n";*/
 
-	printf("\n  usage: %s <arguments>\n\n%s", "fdsemu-cli", usagestr);
+	printf("\n  usage: %s <options> <file(s)>\n\n%s", "fdsemu-cli", usagestr);
 }
 
-bool firmware_update(char *filename)
+bool upload_firmware(uint8_t *firmware, int filesize)
 {
-	uint8_t *firmware;
 	uint8_t *buf;
 	uint32_t *buf32;
 	uint32_t chksum;
-	int filesize, i;
-
-	//try to load the firmware image
-	if (loadfile(filename, &firmware, &filesize) == false) {
-		printf("Error loading firmware file %s'\n", filename);
-		return(false);
-	}
+	int i;
 
 	//create new buffer to hold 32kb of data and clear it
 	buf = new uint8_t[0x8000];
@@ -268,7 +313,7 @@ bool firmware_update(char *filename)
 	printf("waiting for device to reboot\n");
 
 	dev.UpdateFirmware();
-	sleep_ms(5000);
+	sleep_ms(3000);
 
 	if (!dev.Open()) {
 		printf("Open failed.\n");
@@ -277,6 +322,23 @@ bool firmware_update(char *filename)
 	printf("Updated to build %d\n", dev.Version);
 
 	return(true);
+}
+
+bool firmware_update(char *filename)
+{
+	uint8_t *firmware;
+	uint8_t *buf;
+	uint32_t *buf32;
+	uint32_t chksum;
+	int filesize, i;
+
+	//try to load the firmware image
+	if (loadfile(filename, &firmware, &filesize) == false) {
+		printf("Error loading firmware file %s'\n", filename);
+		return(false);
+	}
+
+	return(upload_firmware(firmware, filesize));
 }
 
 uint32_t chksum_calc(uint8_t *buf, int size)
@@ -390,8 +452,9 @@ bool block_decode(uint8_t *dst, uint8_t *src, int *inP, int *outP, int srcSize, 
 //Simplified disk decoding.  This assumes disk will follow standard FDS file structure
 static bool raw03_to_fds(uint8_t *raw, uint8_t *fds, int rawsize) {
 	int in, out;
+	int dstsize = FDSSIZE + 0x10000;
 
-	memset(fds, 0, FDSSIZE);
+	memset(fds, 0, dstsize);
 
 	//lead-in can vary a lot depending on drive, scan for first block to get our bearings
 	in = findFirstBlock(raw) - MIN_GAP_SIZE;
@@ -399,14 +462,14 @@ static bool raw03_to_fds(uint8_t *raw, uint8_t *fds, int rawsize) {
 		return false;
 
 	out = 0;
-	if (!block_decode(fds, raw, &in, &out, rawsize, FDSSIZE + 2, 0x38, 1))
+	if (!block_decode(fds, raw, &in, &out, rawsize, dstsize + 2, 0x38, 1))
 		return false;
-	if (!block_decode(fds, raw, &in, &out, rawsize, FDSSIZE + 2, 2, 2))
+	if (!block_decode(fds, raw, &in, &out, rawsize, dstsize + 2, 2, 2))
 		return false;
 	do {
-		if (!block_decode(fds, raw, &in, &out, rawsize, FDSSIZE + 2, 16, 3))
+		if (!block_decode(fds, raw, &in, &out, rawsize, dstsize + 2, 16, 3))
 			return true;
-		if (!block_decode(fds, raw, &in, &out, rawsize, FDSSIZE + 2, 1 + (fds[out - 16 + 13] | (fds[out - 16 + 14] << 8)), 4))
+		if (!block_decode(fds, raw, &in, &out, rawsize, dstsize + 2, 1 + (fds[out - 16 + 13] | (fds[out - 16 + 14] << 8)), 4))
 			return true;
 	} while (in<rawsize);
 	return true;
@@ -774,7 +837,7 @@ bool FDS_readDisk(char *filename_raw, char *filename_bin, char *filename_fds) {
 
 	//decode to .fds
 	if (filename_fds) {
-		uint8_t *fds = (uint8_t*)malloc(FDSSIZE + 16);   //extra room for CRC junk
+		uint8_t *fds = (uint8_t*)malloc(FDSSIZE + 16 + 0x10000);   //extra room for CRC junk
 		raw03_to_fds(readBuf, fds, bytesIn);
 		if ((f = fopen(filename_fds, "wb"))) {
 			fwrite(fds, 1, FDSSIZE, f);
@@ -822,7 +885,8 @@ static bool writeDisk2(uint8_t *bin, int binSize) {
 bool FDS_writeDisk(char *filename) {
 	enum {
 		LEAD_IN = DEFAULT_LEAD_IN / 8,
-		DISKSIZE = 0x11000,               //whole disk contents including lead-in
+		DISKSIZE = 0x11000 + 0x4000,               //whole disk contents including lead-in
+		ZEROSIZE = 0x10000 + 8192,						//maximum size of sram + "doctor" extra ram
 	};
 
 	uint8_t *inbuf = 0;       //.FDS buffer
@@ -837,8 +901,8 @@ bool FDS_writeDisk(char *filename) {
 	}
 
 	bin = (uint8_t*)malloc(DISKSIZE);
-	zero = (uint8_t*)malloc(0x10000);
-	memset(zero, 0, 0x10000);
+	zero = (uint8_t*)malloc(ZEROSIZE);
+	memset(zero, 0, ZEROSIZE);
 
 	int inpos = 0, side = 0;
 	if (inbuf[0] == 'F')
@@ -850,7 +914,7 @@ bool FDS_writeDisk(char *filename) {
 	do {
 		printf("Side %d\n", side + 1);
 
-		if (dev.Sram->Write(zero, 0, 0x10000) == false) {
+		if (dev.Sram->Write(zero, 0, ZEROSIZE) == false) {
 			printf("Sram write failed (zero).\n");
 			return(false);
 		}
@@ -899,13 +963,13 @@ bool read_flash(char *filename_fds, int slot)
 		return false;
 	}
 
-	printf("Writing %s\n", filename_fds);
+	printf("Reading disk image from flash slot %d to '%s'...\n", slot, filename_fds);
 	fwnesHdr[4] = 0;
 	fwrite(fwnesHdr, 1, sizeof(fwnesHdr), f);
 
 	bin = (uint8_t*)malloc(SLOTSIZE);     //single side from flash
 	raw = (uint8_t*)malloc(RAWSIZE);      //..to raw03
-	fds = (uint8_t*)malloc(FDSSIZE);      //..to FDS
+	fds = (uint8_t*)malloc(FDSSIZE + 0x10000 + 16);      //..to FDS
 
 	int side = 0;
 	for (; side + slot <= (int)dev.Slots; side++) {
@@ -942,6 +1006,64 @@ bool read_flash(char *filename_fds, int slot)
 	return result;
 }
 
+bool read_flash_raw(char *filename, int slot)
+{
+	bool result = true;
+	FILE *f;
+	uint8_t *raw;
+
+	f = fopen(filename, "wb");
+	if (!f) {
+		printf("Can't create %s\n", filename);
+		return false;
+	}
+
+	printf("Reading raw data from flash slot %d to '%s'...\n", slot, filename);
+
+	raw = (uint8_t*)malloc(0x10000);
+
+	int side = 0;
+
+	if (!dev.Flash->Read(raw, slot*SLOTSIZE, SLOTSIZE)) {
+		printf("error reading from flash\n");
+		result = false;
+	}
+	else {
+		fwrite(raw, 1, SLOTSIZE, f);
+	}
+
+	free(raw);
+	fclose(f);
+	return result;
+}
+
+int find_slot(int slots)
+{
+	TFlashHeader *headers = dev.FlashUtil->GetHeaders();
+	int i, j, slot = -1;
+
+	for (i = 0; i < (int)dev.Slots; i++) {
+
+		//check if slot is empty
+		if (headers[i].filename[0] == 0xFF) {
+
+			//check for more empty slots adjacent to this one
+			for (j = 1; j < slots; j++) {
+				if (headers[i + j].filename[0] != 0xFF) {
+					break;
+				}
+			}
+
+			//found an area sufficient to store this flash image
+			if (j == slots) {
+				slot = i;
+				break;
+			}
+		}
+	}
+	return(slot);
+}
+
 bool write_flash(char *filename, int slot)
 {
 	enum { FILENAMELENGTH = 240, };   //number of characters including null
@@ -949,9 +1071,14 @@ bool write_flash(char *filename, int slot)
 	uint8_t *inbuf = 0;
 	uint8_t *outbuf = 0;
 	int filesize;
-	uint32_t i, j;
+	uint32_t i;
 	char *shortName;
 	TFlashHeader *headers = dev.FlashUtil->GetHeaders();
+
+	if (headers == 0) {
+		printf("error reading flash headers");
+		return(false);
+	}
 
 	if (!loadfile(filename, &inbuf, &filesize))
 	{
@@ -977,7 +1104,7 @@ bool write_flash(char *filename, int slot)
 		shortName++;
 
 	//check if an image of the same name is is already stored
-	for (i = 1; i < dev.Slots; i++) {
+	for (i = 0; i < dev.Slots; i++) {
 		if (strncmp(shortName, (char*)headers[i].filename, 240) == 0) {
 			if (force == 0) {
 				printf("An image of the same name is already stored in flash.\n");
@@ -990,50 +1117,16 @@ bool write_flash(char *filename, int slot)
 
 	//try to find an area to store the disk image
 	if (slot == -1) {
-		uint32_t slots = filesize / FDSSIZE;
-
-		if (headers == 0) {
-			delete[] inbuf;
-			return(false);
-		}
-		for (i = 1; i < dev.Slots; i++) {
-
-			//check if slot is empty
-			if (headers[i].filename[0] == 0xFF) {
-
-				//check for more empty slots adjacent to this one
-				for (j = 1; j < slots; j++) {
-					if (headers[i + j].filename[0] != 0xFF) {
-						break;
-					}
-				}
-
-				//found an area sufficient to store this flash image
-				if (j == slots) {
-					slot = i;
-					break;
-				}
-
-			}
-		}
-		if (slot == -1) {
-			printf("Cannot find %d adjacent slots for storing disk image.\nPlease make room on the flash to store this disk image.\n", slots);
-			delete[] inbuf;
-			return(false);
-		}
-
+		slot = find_slot(filesize / FDSSIZE);
 	}
 
-	if (slot == -2) {
-		printf("Updating loader...\n");
-		slot = 0;
-	}
-
-	else if (slot == 0 && dev.Version <= 792) {
-		printf("Cannot write to slot 0.\n");
+	if (slot == -1) {
+		printf("Cannot find %d adjacent slots for storing disk image.\nPlease make room on the flash to store this disk image.\n", filesize / FDSSIZE);
 		delete[] inbuf;
 		return(false);
 	}
+
+	printf("Writing disk image to flash slot %d...\n", slot);
 
 	outbuf = new uint8_t[SLOTSIZE];
 
@@ -1042,12 +1135,9 @@ bool write_flash(char *filename, int slot)
 		if (fds_to_bin(outbuf + FLASHHEADERSIZE, inbuf + pos, SLOTSIZE - FLASHHEADERSIZE)) {
 			memset(outbuf, 0, FLASHHEADERSIZE);
 			uint32_t chksum = chksum_calc(outbuf + FLASHHEADERSIZE, SLOTSIZE - FLASHHEADERSIZE);
-			outbuf[240] = (uint8_t)(chksum >> 0);
-			outbuf[241] = (uint8_t)(chksum >> 8);
-			outbuf[242] = (uint8_t)(chksum >> 16);
-			outbuf[243] = (uint8_t)(chksum >> 24);
 			outbuf[244] = DEFAULT_LEAD_IN & 0xff;
 			outbuf[245] = DEFAULT_LEAD_IN / 256;
+			outbuf[250] = 0;
 
 			if (side == 0) {
 				strncpy((char*)outbuf, shortName, 240);
@@ -1067,52 +1157,331 @@ bool write_flash(char *filename, int slot)
 	return true;
 }
 
-char loaderid[] = "]|<=--LOADER.FDS--=>|[";
-
-bool DetectLoader(uint8_t *buf)
+bool load_doctor_disk(uint8_t **buf, int *len, char *file)
 {
-	int pos, len, count;
-	uint8_t byte;
+	uint8_t *filebuf = 0;
+	int n, filelen = 0;
 
-	for (pos = 0; pos<65500;) {
+	if (loadfile(file, &filebuf, &filelen) == false) {
+		printf("error loading '%s'\n", file);
+		return(false);
+	}
 
-		//read a byte
-		byte = buf[pos++];
+	*len = filelen * 2;
+	*buf = new uint8_t[*len];
 
-		//first byte matches
-		if (byte == loaderid[0]) {
-			len = strlen(loaderid);
-			for (count = 0; byte == loaderid[count] && count < len; count++) {
-				byte = buf[pos + count];
-			}
-			if (count == len) {
-				len = buf[pos + count];
-				printf("Valid loader image found, version %d.%02d\n", len / 100, len % 100);
-				return(true);
-			}
+	if ((n = gameDoctor_to_bin(*buf, filebuf, *len)) == 0) {
+		printf("error converting GD to bin\n");
+		delete[] filebuf;
+		delete[] * buf;
+		*buf = 0;
+		*len = 0;
+		return(false);
+	}
+
+	*len = n;
+
+	delete[] filebuf;
+
+	return(true);
+}
+
+bool load_disk(uint8_t **buf, int *len, char *file)
+{
+	uint8_t *filebuf = 0;
+	int n, filelen = 0;
+	uint8_t *ptr;
+
+	if (loadfile(file, &filebuf, &filelen) == false) {
+		printf("error loading '%s'\n", file);
+		return(false);
+	}
+
+	*len = filelen * 2;
+	*buf = new uint8_t[*len];
+
+	ptr = filebuf;
+	if (memcmp(ptr, "FDS\x1A", 4) == 0) {
+		ptr += 16;
+	}
+
+	if ((n = fds_to_bin(*buf, ptr, *len)) == 0) {
+		printf("error converting fds to bin\n");
+		delete[] filebuf;
+		delete[] * buf;
+		*buf = 0;
+		*len = 0;
+		return(false);
+	}
+
+	*len = n;
+
+	delete[] filebuf;
+
+//	printf("loaded fds format image, filelen = %d, loadedlen = %d\n", filelen, *len);
+
+	return(true);
+}
+
+#include "lz4/lz4.h"       /* still required for legacy format */
+#include "lz4/lz4hc.h"     /* still required for legacy format */
+#include "lz4/lz4frame.h"
+
+/*****************************
+*  Constants
+*****************************/
+#define KB *(1 <<10)
+#define MB *(1 <<20)
+#define GB *(1U<<30)
+
+#define _1BIT  0x01
+#define _2BITS 0x03
+#define _3BITS 0x07
+#define _4BITS 0x0F
+#define _8BITS 0xFF
+
+#define MAGICNUMBER_SIZE    4
+#define LZ4IO_MAGICNUMBER   0x184D2204
+#define LZ4IO_SKIPPABLE0    0x184D2A50
+#define LZ4IO_SKIPPABLEMASK 0xFFFFFFF0
+#define LEGACY_MAGICNUMBER  0x184C2102
+
+#define CACHELINE 64
+#define LEGACY_BLOCKSIZE   (8 MB)
+#define MIN_STREAM_BUFSIZE (192 KB)
+#define LZ4IO_BLOCKSIZEID_DEFAULT 7
+
+#define sizeT sizeof(size_t)
+#define maskT (sizeT - 1)
+
+static int LZ4IO_GetBlockSize_FromBlockId(int id) { return (1 << (8 + (2 * id))); }
+
+static int compress_lz4(uint8_t *src, int srcsize, uint8_t **dst, int *dstsize)
+{
+	unsigned long compressedfilesize = 0;
+	const size_t blockSize = (size_t)LZ4IO_GetBlockSize_FromBlockId(LZ4IO_BLOCKSIZEID_DEFAULT);
+	LZ4F_preferences_t prefs;
+
+	memset(&prefs, 0, sizeof(prefs));
+
+	/* File check */
+	*dst = new uint8_t[srcsize * 2];
+	*dstsize = 0;
+
+	prefs.autoFlush = 1;
+	prefs.compressionLevel = 9;
+	prefs.frameInfo.blockMode = (LZ4F_blockMode_t)1;
+	prefs.frameInfo.blockSizeID = (LZ4F_blockSizeID_t)LZ4IO_BLOCKSIZEID_DEFAULT;
+	prefs.frameInfo.contentChecksumFlag = (LZ4F_contentChecksum_t)1;
+
+	size_t cSize = LZ4F_compressFrame(*dst, srcsize * 2, src, srcsize, &prefs);
+	if (LZ4F_isError(cSize)) {
+		printf("Compression failed : %s", LZ4F_getErrorName(cSize));
+		return(1);
+	}
+
+	compressedfilesize += cSize;
+	*dstsize = compressedfilesize;
+
+//	printf("Compressed %u bytes into %u bytes ==> %.2f%%\n",srcsize, compressedfilesize, (double)compressedfilesize / srcsize * 100); 
+
+	return 0;
+}
+
+void hexdump(char *desc, void *addr, int len)
+{
+	int i;
+	unsigned char buff[17];
+	unsigned char *pc = (unsigned char *)addr;
+
+	if (desc != NULL)
+		printf("%s:\r\n", desc);
+	for (i = 0; i < len; i++) {
+		if ((i % 16) == 0) {
+			if (i != 0)
+				printf("  %s\r\n", buff);
+			printf("  %04x ", i);
 		}
+		printf(" %02x", pc[i]);
+		if ((pc[i] < 0x20) || (pc[i] > 0x7e))
+			buff[i % 16] = '.';
+		else
+			buff[i % 16] = pc[i];
+		buff[(i % 16) + 1] = '\0';
+	}
+	while ((i % 16) != 0) {
+		printf("   ");
+		i++;
+	}
+	printf("  %s\r\n", buff);
+}
+
+char *get_shortname(char *filename)
+{
+	char *shortName = strrchr(filename, '/');      // ...dir/file.fds
+
+#ifdef _WIN32
+	if (!shortName)
+		shortName = strrchr(filename, '\\');        // ...dir\file.fds
+	if (!shortName)
+		shortName = strchr(filename, ':');         // C:file.fds
+#endif
+	if (!shortName)
+		shortName = filename;
+	else
+		shortName++;
+	return(shortName);
+}
+
+#ifndef WIN32
+#include <unistd.h>
+#else
+#include <io.h>
+#define F_OK 00
+#define R_OK 04
+#endif
+
+bool file_exists(char *fn)
+{
+	if (access(fn, F_OK) != -1) {
+		return(true);
 	}
 	return(false);
 }
 
-bool loader_update(char *fn)
+bool find_doctors(char *first, char **files, int *numfiles, int maxfiles)
 {
-	bool ret = false;
-	uint8_t *buf;
-	int len;
+	char *str;
+	int n = 0;
 
-	if (loadfile(fn, &buf, &len) == false) {
-		printf("Error loading file '%s'\n", fn);
+	*numfiles = 0;
+
+	//first check if the first file exists
+	if (file_exists(first) == false) {
+		printf("first disk file doesnt exist: %s\n", first);
 		return(false);
 	}
-	if (DetectLoader(buf) == false) {
-		printf("Specified image doesnt appear to be the loader.\n");
+
+	//add first file to the list
+	files[n++] = strdup(first);
+
+	//copy the first filename into temporary string
+	str = strdup(first);
+
+	//find more files
+	for (; n < maxfiles;) {
+		str[strlen(str) - 1]++;
+//		printf("checking if file '%s' exists...", str);
+		if (file_exists(str) == false) {
+			break;
+		}
+		files[n++] = strdup(str);
 	}
-	else {
-		ret = write_flash(fn, 0x10000);
+	*numfiles = n;
+	return(true);
+}
+
+//TODO: fix memleaks here, and clean up this code
+bool write_doctor(char *file)
+{
+	uint8_t *blocks;		//all blocks for all the images
+	int blockslen;			//length of blocks
+	uint8_t *ptr;
+	int i, slot;
+	char *shortName;
+	char *files[16];
+	int numfiles = 0;
+	uint8_t *buf, *cbuf;
+	int len, clen;
+
+	if (find_doctors(file, files, &numfiles, 16) == false) {
+		return(false);
 	}
-	delete[] buf;
-	return(ret);
+
+	blockslen = 0x10000 * numfiles;
+	blocks = new uint8_t[blockslen];
+	memset(blocks, 0, blockslen);
+	ptr = blocks;
+
+	for (i = 0; i < numfiles; i++) {
+		printf("loading %s...", files[i]);
+		if (load_doctor_disk(&buf, &len, files[i]) == false) {
+			if (load_disk(&buf, &len, files[i]) == false) {
+				printf("error loading disk image '%s'\n", files[i]);
+				delete[] blocks;
+				return(false);
+			}
+		}
+		if (compress_lz4(buf, len, &cbuf, &clen) != 0) {
+			printf("error compressing disk image\n");
+			delete[] buf;
+			delete[] blocks;
+			return(false);
+		}
+		delete[] buf;
+//		printf("loaded and compressed ok (%d bytes -> %d bytes)\n", len, clen);
+		if (clen >= (0x10000 - 256)) {
+			printf("disk too big to store in flash\n");
+			delete[] cbuf;
+			delete[] blocks;
+			return(false);
+		}
+		printf("ok (%d bytes -> %d bytes)\n", len, clen);
+		buf = 0;
+		len = 0;
+		if (i == 0) {
+			shortName = get_shortname(files[i]);
+			strncpy((char*)ptr, shortName, 240);
+		}
+		ptr[240] = (uint8_t)(clen & 0xFF);
+		ptr[241] = (uint8_t)(clen >> 8);
+		ptr[242] = DEFAULT_LEAD_IN & 0xff;
+		ptr[243] = DEFAULT_LEAD_IN / 256;
+		ptr[248] = 0xC1;		//compressed, read only, game doctor format
+		memcpy(ptr + 256, cbuf, clen);
+		delete[] cbuf;
+		cbuf = 0;
+		clen = 0;
+		ptr += 0x10000;
+	}
+
+	if (numfiles == 0) {
+		printf("Failed to find files to write\n");
+		delete[] blocks;
+		return(false);
+	}
+
+	slot = find_slot(numfiles);
+
+	if (slot < 0) {
+		printf("Error finding a slot for disk image\n");
+		delete[] blocks;
+		return(false);
+	}
+
+	printf("Writing %d disk images starting at flash slot %d...\n", numfiles, slot);
+	ptr = blocks;
+
+	for (i = 0; i < numfiles; i++) {
+		printf("Disk %c", 'A' + i);
+//		hexdump("ptr", ptr, 260);
+		if (dev.Flash->Write(ptr, (slot + i)*SLOTSIZE, SLOTSIZE, cli_progress) == false) {
+			printf("error.\n");
+			break;
+		}
+		printf("done.\n");
+		ptr += 0x10000;
+	}
+
+	for (i = 0; i < numfiles; i++) {
+		if (files[i]) {
+			free(files[i]);
+			files[i] = 0;
+		}
+	}
+	delete[] blocks;
+
+	return(true);
 }
 
 bool fds_list(int verbose)
@@ -1162,7 +1531,7 @@ bool fds_list(int verbose)
 
 			//filename is here
 			else if (buf[0] != 0) {
-				printf(" . %s\n", buf);
+				printf("%d: %s\n", i, buf);
 			}
 		}
 	}
@@ -1251,6 +1620,59 @@ bool verify_device()
 	return(ok);
 }
 
+bool is_gamedoctor(char *filename)
+{
+	uint8_t *buf = 0;
+	int len = 0;
+	bool ret = false;
+
+	//make sure it is valid filename
+	if (file_exists(filename) == true) {
+
+		//check file extension
+		if (filename[strlen(filename) - 1] == 'A' || filename[strlen(filename) - 1] == 'a') {
+
+			//load the file
+			if (loadfile(filename, &buf, &len) == true) {
+
+				//verify header
+				if (buf[3] == 0x01 && buf[4] == 0x2a && buf[5] == 0x4e && buf[0x3d] == 0x02) {
+					ret = true;
+				}
+				delete[] buf;
+			}
+		}
+	}
+	return(ret);
+}
+
+int detect_firmware_build(uint8_t *fw, int len)
+{
+	const char ident[] = "NUC123-FDSemu Firmware by James Holodnak";
+	int identlen = strlen(ident);
+	uint8_t byte, *ptr = fw;
+	int i;
+	int ret = -1;
+
+	for (i = 0; i < (len - identlen); i++, fw++) {
+		
+		//first byte is a match, continue checking
+		if (*fw == (uint8_t)ident[0]) {
+
+			//check for match
+			if (memcmp(fw, ident, identlen) == 0) {
+				ret = *(fw + identlen);
+				ret |= *(fw + identlen + 1) << 8;
+				break;
+			}
+		}
+	}
+	return(ret);
+}
+
+extern unsigned char firmware[];
+extern int firmware_length;
+
 int main(int argc, char *argv[])
 {
 	int i, slot;
@@ -1258,8 +1680,13 @@ int main(int argc, char *argv[])
 	char *param = 0;
 	char *param2 = 0;
 	char *param3 = 0;
+	char *params[16] = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
+	int numparams = 0;
+	int required_build = -1;
 
 	printf("fdsemu-cli v%d.%d.%d by James Holodnak, based on code by loopy\n", VERSION / 100, VERSION % 100, BUILDNUM);
+
+	required_build = detect_firmware_build((uint8_t*)firmware, firmware_length);
 
 	if (argc < 2) {
 		usage(argv[0]);
@@ -1341,6 +1768,16 @@ int main(int argc, char *argv[])
 			}
 		}
 
+		//write doctor disk image to flash
+		else if (strcmp(argv[i], "-F") == 0 || strcmp(argv[i], "--write-doctor") == 0) {
+			if ((i + 1) >= argc) {
+				printf("\nPlease specify a filename.\n");
+				return(1);
+			}
+			action = ACTION_WRITEDOCTORFLASH;
+			param = argv[++i];
+		}
+
 		//read disk image from flash
 		else if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--save-flash") == 0) {
 			if ((i + 2) >= argc) {
@@ -1354,6 +1791,19 @@ int main(int argc, char *argv[])
 			}
 		}
 
+		//read disk image from flash
+		else if (strcmp(argv[i], "-S") == 0 || strcmp(argv[i], "--save-flash-raw") == 0) {
+			if ((i + 2) >= argc) {
+				printf("\nPlease specify a filename and slot number.\n");
+				return(1);
+			}
+			action = ACTION_READFLASHRAW;
+			param = argv[++i];
+			if (argv[i][0] != '-') {
+				param2 = argv[++i];
+			}
+		}
+
 		//erase disk image from flash
 		else if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--erase-flash") == 0) {
 			if ((i + 1) >= argc) {
@@ -1361,7 +1811,9 @@ int main(int argc, char *argv[])
 				return(1);
 			}
 			action = ACTION_ERASEFLASH;
-			param = argv[++i];
+			while ((i + 1) < argc) {
+				params[numparams++] = argv[++i];
+			}
 		}
 
 		//verify that the loader is in place and sram/flash is ok
@@ -1400,11 +1852,24 @@ int main(int argc, char *argv[])
 		return(2);
 	}
 
+	printf(" Device: %s, %dMB flash (firmware build %d, flashID %06X)\n", dev.DeviceName, dev.FlashSize / 0x100000, dev.Version, dev.FlashID);
 	printf("\n");
-	printf(" Device opened: %s, %dMB flash (firmware build %d, flashID %06X)\n", dev.DeviceName, dev.FlashSize / 0x100000, dev.Version, dev.FlashID);
-	printf("\n");
+	if (dev.Version < required_build) {
+		char ch;
+
+		printf("Firmware is outdated, the required minimum version is %d\n\n", required_build);
+		printf("Press 'y' to upgrade, any other key cancel: \n");
+		ch = readKb();
+		if (ch == 'Y' || ch == 'y') {
+			success = upload_firmware(firmware, firmware_length);
+		}
+		action = -1;
+	}
 
 	switch (action) {
+
+	default:
+		break;
 
 	case ACTION_NONE:
 		printf("No operation specified.\n");
@@ -1420,23 +1885,31 @@ int main(int argc, char *argv[])
 		success = firmware_update(param);
 		break;
 
-	case ACTION_UPDATELOADER:
-		success = loader_update(param);
+	case ACTION_WRITEFLASH:
+		if (is_gamedoctor(param)) {
+			printf("Detected Game Doctor image.\n");
+			success = write_doctor(param);
+		}
+		else {
+			success = write_flash(param, (param2 == 0) ? -1 : atoi(param2));
+		}
 		break;
 
-	case ACTION_WRITEFLASH:
-		printf("Writing disk image to flash...\n");
-		success = write_flash(param, (param2 == 0) ? -1 : atoi(param2));
+	case ACTION_WRITEDOCTORFLASH:
+		success = write_doctor(param);
 		break;
 
 	case ACTION_READFLASH:
-		printf("Reading disk image from flash...\n");
 		success = read_flash(param, atoi(param2));
+		break;
+
+	case ACTION_READFLASHRAW:
+		success = read_flash_raw(param, atoi(param2));
 		break;
 
 	case ACTION_ERASEFLASH:
 		//erase all slots
-		if (strcmp(param, "all") == 0) {
+		if (params[0] && strcmp(params[0], "all") == 0) {
 			if (force == 0) {
 				printf("This operation will erase all flash disk slots.\nTo confirm this operation please add --force to the command line.\n\n");
 			}
@@ -1449,8 +1922,14 @@ int main(int argc, char *argv[])
 		//erase one slot
 		else {
 			printf("Erase disk image from flash...\n");
-			slot = atoi(param);
-			success = dev.Flash->Erase(slot * SLOTSIZE, SLOTSIZE);
+			for (i = 0; i < numparams; i++) {
+				slot = atoi(params[i]);
+				printf("   Slot %d...\n", slot);
+				success = dev.Flash->Erase(slot * SLOTSIZE, SLOTSIZE);
+				if (success == false) {
+					break;
+				}
+			}
 		}
 		break;
 
