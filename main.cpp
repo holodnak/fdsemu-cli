@@ -273,9 +273,6 @@ bool upload_firmware(uint8_t *firmware, int filesize)
 	memcpy(buf, firmware, filesize);
 	buf32 = (uint32_t*)buf;
 
-	//free firmware data
-	delete[] firmware;
-
 	//insert firmware identifier
 	buf32[(0x8000 - 8) / 4] = 0xDEADBEEF;
 
@@ -327,10 +324,8 @@ bool upload_firmware(uint8_t *firmware, int filesize)
 bool firmware_update(char *filename)
 {
 	uint8_t *firmware;
-	uint8_t *buf;
-	uint32_t *buf32;
-	uint32_t chksum;
-	int filesize, i;
+	int filesize;
+	bool ret = false;
 
 	//try to load the firmware image
 	if (loadfile(filename, &firmware, &filesize) == false) {
@@ -338,7 +333,10 @@ bool firmware_update(char *filename)
 		return(false);
 	}
 
-	return(upload_firmware(firmware, filesize));
+	ret = upload_firmware(firmware, filesize);
+
+	delete[] firmware;
+	return(ret);
 }
 
 uint32_t chksum_calc(uint8_t *buf, int size)
