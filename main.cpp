@@ -1668,6 +1668,33 @@ int detect_firmware_build(uint8_t *fw, int len)
 	return(ret);
 }
 
+bool erase_slot(int slot)
+{
+	TFlashHeader *headers = dev.FlashUtil->GetHeaders();
+	uint8_t *buf;
+
+	if (dev.Flash->Erase(slot * SLOTSIZE, SLOTSIZE) == false) {
+		return(false);
+	}
+	for (uint32_t i = (slot + 1); i<dev.Slots; i++) {
+		buf = headers[i].filename;
+		if (buf[0] == 0xff) {          //empty
+			break;
+		}
+		else if (buf[0] != 0) {      //filename present
+			break;
+		}
+		else {                    //next side
+			if (dev.Flash->Erase(i * SLOTSIZE, SLOTSIZE) == false) {
+				return(false);
+			}
+			printf(", %d", i);
+		}
+	}
+	return(true);
+}
+
+
 extern unsigned char firmware[];
 extern int firmware_length;
 
@@ -1864,6 +1891,8 @@ int main(int argc, char *argv[])
 		action = -1;
 	}
 
+	dev.FlashUtil->ReadHeaders();
+
 	switch (action) {
 
 	default:
@@ -1922,8 +1951,10 @@ int main(int argc, char *argv[])
 			printf("Erase disk image from flash...\n");
 			for (i = 0; i < numparams; i++) {
 				slot = atoi(params[i]);
-				printf("   Slot %d...\n", slot);
-				success = dev.Flash->Erase(slot * SLOTSIZE, SLOTSIZE);
+				printf("   Slot %d", slot);
+				success = erase_slot(slot);
+				printf("\n");
+//				success = dev.Flash->Erase(slot * SLOTSIZE, SLOTSIZE);
 				if (success == false) {
 					break;
 				}
